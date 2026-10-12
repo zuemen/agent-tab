@@ -209,7 +209,8 @@ export async function runScriptedAgent(opts: Omit<RunOptions, "anthropic" | "mod
     const conn = by(sellerId);
     if (!conn) continue;
     const out = await callSellerTool(conn, tool, input, opts.onEvent);
-    lines.push(`${conn.sellerName} · ${tool}: ${out.ok ? "bought" : out.text}`);
+    const free = conn.tools.find((t) => t.name === tool)?.price === "free";
+    lines.push(`${conn.sellerName} · ${tool}: ${out.ok ? (free ? "used (free)" : "bought") : out.text}`);
   }
   const status = (await opts.tabStatus()) as { totals?: { spent?: string; remaining?: string } };
   const answer = [

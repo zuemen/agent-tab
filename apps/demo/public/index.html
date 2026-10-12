@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentTab</title>
+<meta name="description" content="A PayPal-authorized spending tab for AI agents: approve a budget once, meter every paid tool call, capture in batches, pay sellers out.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #f5f1e8;
+  --sheet: #fffdf8;
+  --ink: #1f1c16;
+  --ink-2: #5a5446;
+  --ink-3: #8b8474;
+  --rule: #ddd5c4;
+  --rule-2: #ebe5d8;
+  --green: #0d6b4e;
+  --green-soft: #dcefe6;
+  --amber: #a8660b;
+  --amber-soft: #f7e8cf;
+  --red: #a2352a;
+  --red-soft: #f6dcd6;
+  --focus: #0d6b4e;
+  --shadow: 0 1px 0 rgba(31, 28, 22, .04), 0 12px 32px -18px rgba(31, 28, 22, .28);
+  --serif: "Fraunces", Georgia, serif;
+  --sans: "Atkinson Hyperlegible", "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #15140f; --sheet: #1d1b16; --ink: #f1ece0; --ink-2: #c3bba8; --ink-3: #8f8877;
+    --rule: #38342b; --rule-2: #2a2721; --green: #5cc39b; --green-soft: #183328; --amber: #e3a34a;
+    --amber-soft: #3a2b14; --red: #e2786b; --red-soft: #3d1f1a; --focus: #5cc39b;
+    --shadow: 0 1px 0 rgba(0,0,0,.3), 0 12px 32px -18px rgba(0,0,0,.8); color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #15140f; --sheet: #1d1b16; --ink: #f1ece0; --ink-2: #c3bba8; --ink-3: #8f8877;
+  --rule: #38342b; --rule-2: #2a2721; --green: #5cc39b; --green-soft: #183328; --amber: #e3a34a;
+  --amber-soft: #3a2b14; --red: #e2786b; --red-soft: #3d1f1a; --focus: #5cc39b;
+  --shadow: 0 1px 0 rgba(0,0,0,.3), 0 12px 32px -18px rgba(0,0,0,.8); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--paper);
+  background-image: radial-gradient(var(--rule-2) 0.6px, transparent 0.6px);
+  background-size: 14px 14px;
+  color: var(--ink);
+  font: 16px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+
+/* header */
+header.top { border-bottom: 1px solid var(--rule); background: color-mix(in srgb, var(--paper) 88%, transparent); backdrop-filter: blur(6px); position: sticky; top: 0; z-index: 5; }
+header.top .wrap { display: flex; align-items: center; gap: 14px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -.01em; }
+.ticket { width: 26px; height: 18px; border: 2px solid var(--ink); border-radius: 3px; position: relative; }
+.ticket::before, .ticket::after { content: ""; position: absolute; top: 50%; width: 8px; height: 8px; background: var(--paper); border: 2px solid var(--ink); border-radius: 50%; transform: translateY(-50%); }
+.ticket::before { left: -6px; clip-path: inset(0 0 0 50%); }
+.ticket::after { right: -6px; clip-path: inset(0 50% 0 0); }
+.rail { margin-left: auto; font: 500 12px/1 var(--mono); letter-spacing: .04em; text-transform: uppercase; padding: 7px 10px; border-radius: 999px; border: 1px solid var(--rule); color: var(--ink-2); }
+.rail.sandbox { border-color: var(--green); color: var(--green); }
+.rail.simulated { border-color: var(--amber); color: var(--amber); background: var(--amber-soft); }
+.theme { border: 1px solid var(--rule); background: transparent; border-radius: 999px; width: 34px; height: 34px; cursor: pointer; }
+
+/* type */
+h1, h2, h3 { font-family: var(--serif); font-weight: 600; letter-spacing: -.015em; line-height: 1.15; margin: 0; }
+h1 { font-size: clamp(34px, 5vw, 56px); }
+h2 { font-size: 26px; }
+h3 { font-size: 18px; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.muted { color: var(--ink-2); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* landing */
+.hero { display: grid; grid-template-columns: 1.15fr .85fr; gap: 48px; padding: 64px 0 40px; align-items: center; }
+.hero p.lede { font-size: 19px; color: var(--ink-2); max-width: 34em; margin: 18px 0 28px; }
+.cta { display: inline-flex; align-items: center; gap: 10px; background: var(--ink); color: var(--sheet); border: 0; border-radius: 10px; padding: 14px 20px; font-weight: 700; cursor: pointer; text-decoration: none; transition: transform .15s ease, box-shadow .15s ease; }
+.cta:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+.cta[disabled] { opacity: .5; cursor: progress; transform: none; }
+.cta.green { background: var(--green); color: #fff; }
+.ghost { background: transparent; border: 1px solid var(--rule); border-radius: 10px; padding: 11px 16px; cursor: pointer; font-weight: 700; }
+.ghost:hover { border-color: var(--ink-3); }
+.ghost.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--rule)); }
+.fine { font-size: 13px; color: var(--ink-3); margin-top: 12px; }
+
+.slip { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; box-shadow: var(--shadow); position: relative; }
+.slip.torn::after { content: ""; position: absolute; left: 0; right: 0; bottom: -9px; height: 10px; background: radial-gradient(circle at 7px -2px, transparent 7px, var(--sheet) 7.5px) 0 0 / 14px 10px repeat-x; filter: drop-shadow(0 1px 0 var(--rule)); }
+.demo-slip { padding: 22px 22px 26px; font-family: var(--mono); font-size: 13.5px; transform: rotate(1.2deg); }
+.demo-slip .row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px dashed var(--rule); }
+.demo-slip .row:last-child { border: 0; }
+.demo-slip .refused { color: var(--red); }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 24px 0 56px; counter-reset: step; }
+.step { padding: 20px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; }
+.step::before { counter-increment: step; content: "0" counter(step); font: 500 13px var(--mono); color: var(--green); display: block; margin-bottom: 10px; }
+.step p { margin: 8px 0 0; color: var(--ink-2); font-size: 15px; }
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 64px; }
+.rules { list-style: none; padding: 0; margin: 14px 0 0; }
+.rules li { padding: 12px 0; border-bottom: 1px solid var(--rule-2); display: flex; gap: 12px; }
+.rules li b { min-width: 9.5em; }
+.sellers { display: grid; gap: 10px; margin-top: 14px; }
+.seller { padding: 14px 16px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sheet); }
+.seller .tools { font: 13px var(--mono); color: var(--ink-2); margin-top: 6px; }
+.seller.offlist { border-style: dashed; }
+
+/* tab page */
+.page { padding: 32px 0 64px; }
+.grid { display: grid; grid-template-columns: 380px 1fr; gap: 28px; align-items: start; }
+.receipt { padding: 22px; }
+.status { display: inline-flex; align-items: center; gap: 8px; font: 500 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; padding: 6px 10px; border-radius: 999px; background: var(--rule-2); color: var(--ink-2); }
+.status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.status.active { background: var(--green-soft); color: var(--green); }
+.status.active::before { animation: pulse 1.6s ease-in-out infinite; }
+.status.closing, .status.awaiting_approval { background: var(--amber-soft); color: var(--amber); }
+.status.closed { background: var(--rule-2); color: var(--ink-2); }
+.status.cancelled { background: var(--red-soft); color: var(--red); }
+@keyframes pulse { 50% { opacity: .35; } }
+.bigspend { display: flex; align-items: baseline; gap: 8px; margin: 18px 0 6px; }
+.bigspend .num { font-size: 40px; font-weight: 500; letter-spacing: -.02em; }
+.meter { height: 12px; border-radius: 3px; background: var(--rule-2); display: flex; overflow: hidden; border: 1px solid var(--rule); }
+.meter span { display: block; height: 100%; transition: width .5s cubic-bezier(.2,.8,.2,1); }
+.meter .cap { background: var(--green); }
+.meter .unc { background: repeating-linear-gradient(-45deg, var(--amber), var(--amber) 4px, color-mix(in srgb, var(--amber) 60%, transparent) 4px, color-mix(in srgb, var(--amber) 60%, transparent) 8px); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--ink-2); margin: 10px 0 4px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+dl.terms { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 18px 0; font-size: 14px; }
+dl.terms dt { color: var(--ink-3); }
+dl.terms dd { margin: 0; text-align: right; font-family: var(--mono); }
+.refs { font: 12px/1.7 var(--mono); color: var(--ink-3); border-top: 1px dashed var(--rule); padding-top: 12px; word-break: break-all; }
+.refs b { color: var(--ink-2); font-weight: 500; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.panel { padding: 0; overflow: hidden; }
+.panel-head { display: flex; align-items: center; gap: 14px; padding: 14px 18px; border-bottom: 1px solid var(--rule); }
+.panel-head .count { margin-left: auto; font: 12px var(--mono); color: var(--ink-3); }
+table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
+.ledger th { text-align: left; font: 500 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); padding: 10px 18px; border-bottom: 1px solid var(--rule); }
+.ledger td { padding: 11px 18px; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+.ledger td.amt, .ledger th.amt { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.ledger tr.new td { animation: rowin .7s ease; }
+@keyframes rowin { from { background: var(--green-soft); } to { background: transparent; } }
+.ledger .capture-row td { background: color-mix(in srgb, var(--green-soft) 55%, transparent); font-size: 13px; }
+.ledger .capture-row.pending td { background: var(--amber-soft); }
+.empty { padding: 28px 18px; color: var(--ink-3); text-align: center; }
+.feed { list-style: none; margin: 0; padding: 6px 0; max-height: 460px; overflow: auto; }
+.feed li { padding: 9px 18px; font-size: 14px; display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: start; }
+.feed li .ico { font-family: var(--mono); color: var(--ink-3); }
+.feed li.pay .ico { color: var(--green); }
+.feed li.refused { background: var(--red-soft); }
+.feed li.refused .ico, .feed li.refused .what { color: var(--red); }
+.feed li .amt { font-family: var(--mono); color: var(--ink-2); }
+.answer { margin: 0; padding: 16px 18px; border-top: 1px solid var(--rule); white-space: pre-wrap; font-size: 15px; background: color-mix(in srgb, var(--sheet) 70%, var(--paper)); }
+.stack { display: grid; gap: 20px; }
+.note { padding: 12px 14px; border-radius: 6px; font-size: 14px; border: 1px solid var(--rule); background: var(--sheet); }
+.note.warn { border-color: color-mix(in srgb, var(--amber) 45%, var(--rule)); background: var(--amber-soft); }
+.note.err { border-color: color-mix(in srgb, var(--red) 45%, var(--rule)); background: var(--red-soft); }
+
+/* review form */
+.review { max-width: 760px; margin: 0 auto; padding: 28px; }
+.ask { font-family: var(--serif); font-size: 19px; border-left: 3px solid var(--green); padding: 4px 0 4px 16px; margin: 16px 0 24px; color: var(--ink-2); }
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 20px; }
+.field label { display: block; font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.field .hint { font-size: 13px; color: var(--ink-3); margin-top: 5px; }
+.money { display: flex; align-items: center; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); overflow: hidden; }
+.money span { padding: 0 10px; color: var(--ink-3); font-family: var(--mono); }
+.money input, .plain { width: 100%; border: 0; background: transparent; padding: 11px 12px 11px 0; font-family: var(--mono); }
+.plain { border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); padding: 11px 12px; }
+.checks { grid-column: 1 / -1; border: 1px solid var(--rule); border-radius: 8px; padding: 6px 14px; }
+.checks label { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--rule-2); cursor: pointer; }
+.checks label:last-child { border: 0; }
+.checks input { margin-top: 4px; accent-color: var(--green); width: 17px; height: 17px; }
+.checks small { display: block; color: var(--ink-3); font: 12.5px var(--mono); }
+.submit-row { display: flex; align-items: center; gap: 16px; margin-top: 24px; flex-wrap: wrap; }
+
+@media (max-width: 900px) {
+  .hero, .split, .grid { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: 1fr; }
+  .demo-slip { transform: none; }
+  .form { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <a class="brand" href="/"><span class="ticket" aria-hidden="true"></span>AgentTab</a>
+  <span id="rail" class="rail">…</span>
+  <button class="theme" id="theme" title="Toggle theme" aria-label="Toggle light or dark theme">◐</button>
+</div></header>
+<main id="app" class="wrap"></main>
+
+<script>
+"use strict";
+const $app = document.getElementById("app");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Server amounts are exact decimal strings; keep sub-cent digits when present.
+const money = (v) => {
+  const dec = (String(v ?? "").split(".")[1] || "").replace(/0+$/, "").length;
+  return "$" + (Number(v) || 0).toFixed(Math.max(2, Math.min(6, dec)));
+};
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+};
+const short = (id) => (id ? String(id).slice(0, 4) + "…" + String(id).slice(-6) : "—");
+const time = (ms) => new Date(ms).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+(function theme() {
+  const btn = document.getElementById("theme");
+  try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+  btn.onclick = () => {
+    const dark = document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("theme", document.documentElement.dataset.theme); } catch {}
+  };
+})();
+
+let INFO = null;
+async function loadInfo() {
+  INFO = await api("/api/demo/info");
+  const rail = document.getElementById("rail");
+  rail.textContent = INFO.rail === "sandbox" ? "PayPal Sandbox" : "Simulated rail";
+  rail.className = "rail " + INFO.rail;
+  rail.title = INFO.rail === "sandbox" ? "Real PayPal sandbox API calls (test money)" : "No PayPal calls: in-memory stand-in. Configure sandbox credentials for the real flow.";
+}
+
+/* ---------------- landing ---------------- */
+function renderLanding() {
+  document.title = "AgentTab";
+  const sellers = INFO.sellers.map((s) => {
+    const off = !INFO.demoSellers.includes(s.id);
+    return `<div class="seller ${off ? "offlist" : ""}"><b>${esc(s.name)}</b>${off ? ' <span class="muted">· not on the demo allowlist</span>' : ""}
+      <div class="muted" style="font-size:14px">${esc(s.description)}</div>
+      <div class="tools">${s.tools.map((t) => `${esc(t.name)} · ${t.price ? "$" + esc(t.price) : "free"}`).join("<br>")}</div></div>`;
+  }).join("");
+  $app.innerHTML = `
+  <section class="hero">
+    <div>
+      <div class="eyebrow">A spending tab for AI agents</div>
+      <h1 style="margin-top:14px">Give your agent a tab,<br>not your card.</h1>
+      <p class="lede">Your agent asks for a budget. You approve it once with PayPal. Every paid tool call is checked against your rules, metered on the tab, and captured in batches. When you close the tab, the unused amount is released and each seller is paid out.</p>
+      <button class="cta" id="start">Start the demo →</button>
+      <p class="fine">Demo sellers, places and prices are fictional. ${INFO.rail === "sandbox" ? "Payments run against the PayPal sandbox (test money)." : "This server has no PayPal credentials, so it uses a simulated rail; nothing is charged."} Agent: ${INFO.agentMode === "claude" ? "Claude decides what to buy." : "scripted purchase plan (no language model configured)."}</p>
+    </div>
+    <div class="slip torn demo-slip" aria-label="Example tab">
+      <div class="eyebrow" style="margin-bottom:12px">Example tab · authorized $3.00</div>
+      <div class="row"><span>Harbor Gazette · article</span><span>$0.05</span></div>
+      <div class="row"><span>Harbor Gazette · article</span><span>$0.05</span></div>
+      <div class="row"><span>Openfield · price history</span><span>$0.02</span></div>
+      <div class="row"><span>Openfield · competitor menu</span><span>$0.25</span></div>
+      <div class="row"><span>Field Panel · 5 answers</span><span>$0.40</span></div>
+      <div class="row refused"><span>Velvet · forecast · refused</span><span>$25.00</span></div>
+      <div class="row"><b>Captured</b><b>$0.77</b></div>
+      <div class="row"><span>Released to buyer</span><span>$2.23</span></div>
+    </div>
+  </section>
+  <div class="steps">
+    <div class="step"><h3>The agent asks</h3><p>It proposes a budget, a per-call cap, the sellers it wants to use, and an expiry. You can tighten any of them.</p></div>
+    <div class="step"><h3>You authorize once</h3><p>PayPal places a hold for the budget. No card number ever reaches the agent or the sellers.</p></div>
+    <div class="step"><h3>Every call is metered</h3><p>Sellers' tools are paid per call from the tab, captured from the hold in batches, and paid out when the tab closes.</p></div>
+  </div>
+  <div class="split">
+    <section><h2>What the tab enforces</h2><ul class="rules">
+      <li><b>Budget</b><span class="muted">Equals the PayPal authorization. Captures can never exceed it.</span></li>
+      <li><b>Per-call cap</b><span class="muted">One expensive call cannot drain the tab.</span></li>
+      <li><b>Allowed sellers</b><span class="muted">Anyone else is refused, however the agent asks.</span></li>
+      <li><b>Expiry</b><span class="muted">At most 71 hours, inside the window where PayPal honors the held funds.</span></li>
+      <li><b>Agent signature</b><span class="muted">Each charge is signed by the agent's key; sellers cannot forge or replay one.</span></li>
+      <li><b>Revoke</b><span class="muted">One click stops new charges, captures what was used, releases the rest.</span></li>
+    </ul></section>
+    <section><h2>Sellers in this demo</h2><div class="sellers">${sellers}</div></section>
+  </div>`;
+  document.getElementById("start").onclick = async (e) => {
+    e.target.disabled = true;
+    try { const r = await api("/api/demo/start", { method: "POST" }); location.href = "/tab/" + r.tabId; }
+    catch (err) { e.target.disabled = false; alertBox(err.message); }
+  };
+}
+
+function alertBox(msg, kind = "err") {
+  const n = document.createElement("div");
+  n.className = "note " + kind;
+  n.style.margin = "16px 0";
+  n.textContent = msg;
+  $app.prepend(n);
+}
+
+/* ---------------- tab page ---------------- */
+let TAB = null, FEED = [], seenSeq = new Set(), ES = null, RUNNING = false, ANSWER = null;
+
+async function renderTab(tabId) {
+  TAB = await api("/api/tabs/" + encodeURIComponent(tabId));
+  document.title = "Tab " + short(tabId) + " · AgentTab";
+  const q = new URLSearchParams(location.search);
+  if (TAB.status === "requested") return renderReview(q);
+  renderDashboard(q);
+  if (!ES) connectEvents(tabId);
+}
+
+function renderReview(q) {
+  const s = TAB.suggested;
+  const sellerRows = INFO.sellers.map((x) => {
+    const checked = s.sellers.includes(x.id) ? "checked" : "";
+    const prices = x.tools.map((t) => `${esc(t.name)} ${t.price ? "$" + esc(t.price) : "free"}`).join(" · ");
+    return `<label><input type="checkbox" name="seller" value="${esc(x.id)}" ${checked}><span><b>${esc(x.name)}</b><small>${prices}</small></span></label>`;
+  }).join("");
+  $app.innerHTML = `<div class="page"><div class="slip torn review">
+    <div class="eyebrow">Spending request · ${esc(short(TAB.tabId))}</div>
+    <h2 style="margin-top:10px">${esc(TAB.agentName)} is asking for a tab</h2>
+    <p class="ask">“${esc(TAB.purpose)}”</p>
+    ${q.get("cancelled") ? '<div class="note warn" style="margin-bottom:16px">You cancelled at PayPal. Nothing was authorized.</div>' : ""}
+    <form id="terms" class="form">
+      <div class="field"><label for="budget">Budget</label><div class="money"><span>$</span><input id="budget" inputmode="decimal" value="${esc(s.budgetUsd)}" required></div><div class="hint">PayPal holds this amount. You pay only what is used.</div></div>
+      <div class="field"><label for="cap">Per-call cap</label><div class="money"><span>$</span><input id="cap" inputmode="decimal" value="${esc(s.perCallCapUsd)}" required></div><div class="hint">The most a single tool call may cost.</div></div>
+      <div class="field"><label for="thr">Capture every</label><div class="money"><span>$</span><input id="thr" inputmode="decimal" value="${esc(s.captureThresholdUsd)}" required></div><div class="hint">Usage is captured in batches of this size to keep fees low.</div></div>
+      <div class="field"><label for="hrs">Expires after</label><select id="hrs" class="plain">${[1, 6, 24, 48, 71].map((h) => `<option value="${h}" ${h === Number(s.expiresInHours) ? "selected" : ""}>${h} hours</option>`).join("")}</select><div class="hint">Unused budget is released at expiry.</div></div>
+      <fieldset class="checks"><legend class="eyebrow" style="padding:0 6px">Sellers the agent may pay</legend>${sellerRows}</fieldset>
+    </form>
+    <div class="submit-row">
+      <button class="cta green" id="authorize">Authorize $${esc(Number(s.budgetUsd).toFixed(2))} with PayPal</button>
+      <button class="ghost" id="decline">Decline</button>
+      <span class="fine" style="margin:0">${INFO.rail === "sandbox" ? "You will sign in to a PayPal sandbox buyer account." : "Simulated rail: a stand-in approval page, no PayPal account involved."}</span>
+    </div>
+  </div></div>`;
+  const btn = document.getElementById("authorize");
+  document.getElementById("budget").oninput = (e) => { btn.textContent = "Authorize $" + (Number(e.target.value) || 0).toFixed(2) + " with PayPal"; };
+  document.getElementById("decline").onclick = async () => { await api(`/api/tabs/${TAB.tabId}/close`, { method: "POST" }); location.href = "/"; };
+  btn.onclick = async () => {
+    const terms = {
+      budgetUsd: document.getElementById("budget").value.trim(),
+      perCallCapUsd: document.getElementById("cap").value.trim(),
+      captureThresholdUsd: document.getElementById("thr").value.trim(),
+      expiresInHours: Number(document.getElementById("hrs").value),
+      sellers: [...document.querySelectorAll('input[name="seller"]:checked')].map((i) => i.value),
+    };
+    btn.disabled = true;
+    try { const r = await api(`/api/tabs/${TAB.tabId}/terms`, { method: "POST", body: JSON.stringify(terms) }); location.href = r.approveUrl; }
+    catch (err) { btn.disabled = false; alertBox(err.message); }
+  };
+}
+
+function meterHtml(t) {
+  const b = Number(TAB.mandate.budget) || 1;
+  const cap = Math.min(100, (Number(t.captured) / b) * 100);
+  const unc = Math.min(100 - cap, (Number(t.uncaptured) / b) * 100);
+  return `<div class="meter" role="img" aria-label="Captured ${t.captured}, not yet captured ${t.uncaptured}, of ${TAB.mandate.budget}"><span class="cap" style="width:${cap}%"></span><span class="unc" style="width:${unc}%"></span></div>
+  <div class="legend"><span><i style="background:var(--green)"></i>Captured ${money(t.captured)}</span><span><i style="background:var(--amber)"></i>Not yet captured ${money(t.uncaptured)}</span><span><i style="background:var(--rule-2);border:1px solid var(--rule)"></i>Remaining ${money(t.remaining)}</span></div>`;
+}
+
+function renderDashboard(q) {
+  const t = TAB.totals || { spent: "0", remaining: "0", captured: "0", uncaptured: "0", calls: 0 };
+  const m = TAB.mandate;
+  const p = TAB.paypal || {};
+  const active = TAB.status === "active";
+  const closed = TAB.status === "closed" || TAB.status === "cancelled";
+  const sellerName = (id) => INFO.sellers.find((s) => s.id === id)?.name || id;
+  const notes = [];
+  if (q.get("approved") && active) notes.push(`<div class="note">Authorized with PayPal. The hold is in place; nothing has been charged yet.</div>`);
+  if (q.get("error")) notes.push(`<div class="note err">${esc(q.get("error"))}</div>`);
+  if (TAB.closeReason === "capture_failed") notes.push(`<div class="note err">PayPal refused a capture, so the tab was frozen: no new charges are accepted.</div>`);
+  if (TAB.status === "awaiting_approval") notes.push(`<div class="note warn">Waiting for PayPal approval. If you closed the PayPal window, start again from the review page.</div>`);
+
+  const rows = [];
+  for (const e of TAB.entries || []) rows.push({ at: e.settledAt, html: `<tr class="${seenSeq.has(e.seq) ? "" : "new"}"><td><span class="num">#${e.seq}</span> <span class="muted" style="font-size:12px">${time(e.settledAt)}</span></td><td>${esc(sellerName(e.seller))} · ${esc(e.resource.split("/").pop())}<div class="num muted" style="font-size:11.5px;word-break:break-all">${esc(TAB.tabId)}:${e.seq}</div></td><td class="amt">${money(e.amount)}</td></tr>` });
+  for (const c of TAB.captures || []) rows.push({ at: c.createdAt + 1, html: `<tr class="capture-row ${c.status}"><td colspan="2"><b>${c.status === "completed" ? "Captured from PayPal hold" : c.status === "failed" ? "Capture failed" : "Capturing…"}</b>${c.final ? " (final)" : ""} <span class="num muted" style="font-size:12px">${esc(c.paypalCaptureId || c.requestId)}</span>${c.error ? `<div style="color:var(--red)">${esc(c.error)}</div>` : ""}</td><td class="amt">${money(c.amount)}</td></tr>` });
+  rows.sort((a, b) => a.at - b.at);
+  (TAB.entries || []).forEach((e) => seenSeq.add(e.seq));
+
+  const payout = TAB.payout;
+  const payoutHtml = payout ? `<section class="slip panel"><div class="panel-head"><h3>Paid out to sellers</h3><span class="count">${esc(payout.status)}${payout.batchId ? " · " + esc(short(payout.batchId)) : ""}</span></div>
+    <table class="ledger"><thead><tr><th>Seller</th><th class="amt">Amount</th></tr></thead><tbody>
+    ${payout.lines.map((l) => `<tr><td>${esc(sellerName(l.seller))}</td><td class="amt">${money(l.amount)}</td></tr>`).join("")}
+    <tr><td class="muted">Platform fee and rounding</td><td class="amt">${money(payout.platformFee)}</td></tr></tbody></table>
+    ${payout.error ? `<div class="note err" style="margin:12px">${esc(payout.error)}</div>` : ""}</section>` : "";
+
+  $app.innerHTML = `<div class="page"><div class="stack" style="margin-bottom:20px">${notes.join("")}</div><div class="grid">
+    <aside class="slip torn receipt">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span class="eyebrow">Tab ${esc(short(TAB.tabId))}</span><span class="status ${esc(TAB.status)}">${esc(TAB.status.replace("_", " "))}</span></div>
+      <div class="bigspend"><span class="num">${money(t.spent)}</span><span class="muted">of ${money(m ? m.budget : 0)} used</span></div>
+      ${m ? meterHtml(t) : ""}
+      ${m ? `<dl class="terms">
+        <dt>Per-call cap</dt><dd>${money(m.perCallCap)}</dd>
+        <dt>Capture every</dt><dd>${money(m.captureThreshold)}</dd>
+        <dt>Expires</dt><dd>${esc(new Date(m.expiresAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }))}</dd>
+        <dt>Paid calls</dt><dd>${t.calls}</dd>
+        <dt>Allowed sellers</dt><dd style="font-family:var(--sans)">${m.allowedSellers.map((s) => esc(sellerName(s))).join("<br>")}</dd>
+      </dl>` : ""}
+      <div class="refs"><b>PayPal order</b> ${esc(p.orderId || "—")}<br><b>Authorization</b> ${esc(p.authorizationId || "—")}${p.voided ? "<br><b>Remainder</b> released (voided)" : ""}${TAB.closeReason ? `<br><b>Closed</b> ${esc(TAB.closeReason.replace(/_/g, " "))}` : ""}</div>
+      <div class="actions">
+        ${active ? `<button class="cta" id="run" ${RUNNING ? "disabled" : ""}>${RUNNING ? "Agent working…" : "Run the agent"}</button>` : ""}
+        ${active ? `<button class="ghost" id="close">Close tab</button><button class="ghost danger" id="revoke">Revoke</button>` : ""}
+        ${closed ? `<a class="cta" href="/">New demo</a>` : ""}
+      </div>
+    </aside>
+    <div class="stack">
+      <section class="slip panel"><div class="panel-head"><h3>Ledger</h3><span class="count">${t.calls} paid calls · ${(TAB.captures || []).filter((c) => c.status === "completed").length} captures</span></div>
+        ${rows.length ? `<table class="ledger"><thead><tr><th>Call</th><th>Seller · item · ledger ref</th><th class="amt">Amount</th></tr></thead><tbody>${rows.map((r) => r.html).join("")}</tbody></table>` : `<div class="empty">No charges yet. ${active ? "Run the agent to start buying." : ""}</div>`}
+      </section>
+      ${payoutHtml}
+      <section class="slip panel"><div class="panel-head"><h3>Agent activity</h3><span class="count">${INFO.agentMode === "claude" ? "Claude" : "scripted"}</span></div>
+        ${FEED.length ? `<ul class="feed" id="feed">${FEED.map(feedItem).join("")}</ul>` : `<div class="empty">The agent's purchases and refusals appear here as they happen.</div>`}
+        ${ANSWER ? `<p class="answer">${esc(ANSWER)}</p>` : ""}
+      </section>
+    </div>
+  </div></div>`;
+  const feed = document.getElementById("feed");
+  if (feed) feed.scrollTop = feed.scrollHeight;
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
+  on("run", async (e) => {
+    e.target.disabled = true;
+    try { const r = await api("/api/demo/run", { method: "POST", body: JSON.stringify({ tabId: TAB.tabId }) }); RUNNING = true; FEED.push({ type: "start", mode: r.mode }); refresh(); }
+    catch (err) { e.target.disabled = false; alertBox(err.message); }
+  });
+  on("close", () => act("close"));
+  on("revoke", () => act("revoke"));
+}
+
+async function act(kind) {
+  const label = kind === "revoke" ? "Revoke the tab? New charges stop now; used amounts are captured and the rest is released." : "Close the tab? Usage is captured, the rest is released and sellers are paid out.";
+  if (!confirm(label)) return;
+  try { TAB = await api(`/api/tabs/${TAB.tabId}/${kind}`, { method: "POST" }); renderDashboard(new URLSearchParams()); }
+  catch (err) { alertBox(err.message); }
+}
+
+const REASONS = {
+  seller_not_allowed: "this seller is not on your tab",
+  insufficient_funds: "over the remaining budget",
+  over_per_call_cap: "above the per-call cap",
+  tab_not_active: "the tab is not open",
+  tab_expired: "the tab has expired",
+  invalid_signature: "not signed by your agent's key",
+  charge_expired: "the charge expired",
+  replayed_nonce: "a replayed charge",
+  terms_mismatch: "price or item does not match",
+  unknown_tab: "unknown tab",
+};
+function plainReason(code) {
+  const key = Object.keys(REASONS).find((k) => String(code).includes(k));
+  return key ? REASONS[key] : String(code);
+}
+
+function feedItem(ev) {
+  const row = (cls, ico, what, amt = "") => `<li class="${cls}"><span class="ico">${ico}</span><span class="what">${what}</span><span class="amt">${amt}</span></li>`;
+  switch (ev.type) {
+    case "start": return row("", "▸", `Agent started (${ev.mode === "claude" ? "Claude" : "scripted plan"})`);
+    case "tool_call": return row("", "→", `${esc(ev.seller)} · ${esc(ev.tool)}`, ev.price === "free" ? "free" : esc(ev.price));
+    case "payment": return row("pay", "✓", `Paid ${esc(ev.seller)} for ${esc(ev.tool)}`, esc(ev.amount));
+    case "payment_refused": return row("refused", "✕", `<span title="${esc(ev.reason)}">Refused: ${esc(ev.seller)} · ${esc(ev.tool)} — ${esc(plainReason(ev.reason))}</span>`);
+    case "text": return row("", "“", esc(ev.text.length > 220 ? ev.text.slice(0, 220) + "…" : ev.text));
+    case "done": return row("", "■", "Agent finished");
+    default: return "";
+  }
+}
+
+let refreshTimer = null;
+function refresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    try { TAB = await api("/api/tabs/" + TAB.tabId); if (TAB.status !== "requested") renderDashboard(new URLSearchParams(location.search)); } catch {}
+  }, 120);
+}
+
+function connectEvents(tabId) {
+  ES = new EventSource(`/api/tabs/${encodeURIComponent(tabId)}/events`);
+  const on = (type, fn) => ES.addEventListener(type, (m) => fn(JSON.parse(m.data)));
+  for (const type of ["tab_active", "charge", "capture_started", "capture_completed", "capture_failed", "capture_retry_pending", "tab_closing", "tab_closed", "authorization_voided", "payout_sent", "payout_failed"]) on(type, refresh);
+  on("agent", (ev) => {
+    const d = ev.detail;
+    if (d.type === "tool_result" || d.type === "thinking") return;
+    FEED.push(d);
+    if (d.type === "done") { RUNNING = false; ANSWER = d.answer; }
+    refresh();
+  });
+}
+
+(async function route() {
+  try {
+    await loadInfo();
+    const m = location.pathname.match(/^\/tab\/([A-Za-z0-9_-]+)$/);
+    if (m) await renderTab(m[1]);
+    else renderLanding();
+  } catch (err) {
+    $app.innerHTML = `<div class="page"><div class="note err">${esc(err.message)}</div></div>`;
+  }
+})();
+</script>
+</body>
+</html>

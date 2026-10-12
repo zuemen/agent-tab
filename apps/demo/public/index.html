@@ -365,7 +365,7 @@ function renderDashboard(q) {
   const closed = TAB.status === "closed" || TAB.status === "cancelled";
   const sellerName = (id) => INFO.sellers.find((s) => s.id === id)?.name || id;
   const notes = [];
-  if (q.get("approved") && active) notes.push(`<div class="note">Authorized with PayPal. The hold is in place; nothing has been charged yet.</div>`);
+  if (q.get("approved") && active && !t.calls) notes.push(`<div class="note">Authorized with PayPal. The hold is in place; nothing has been charged yet.</div>`);
   if (q.get("error")) notes.push(`<div class="note err">${esc(q.get("error"))}</div>`);
   if (TAB.closeReason === "capture_failed") notes.push(`<div class="note err">PayPal refused a capture, so the tab was frozen: no new charges are accepted.</div>`);
   if (TAB.status === "awaiting_approval") notes.push(`<div class="note warn">Waiting for PayPal approval. If you closed the PayPal window, start again from the review page.</div>`);

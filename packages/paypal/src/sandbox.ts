@@ -46,6 +46,11 @@ export class SandboxRail implements PayPalRail {
     this.fetchImpl = opts.fetch ?? fetch;
   }
 
+  /** OAuth access token for this app (shared with the PayPal Agent Toolkit). */
+  getAccessToken(): Promise<string> {
+    return this.accessToken();
+  }
+
   private async accessToken(): Promise<string> {
     if (this.token && this.token.expiresAt > Date.now() + 60_000) return this.token.value;
     const basic = Buffer.from(`${this.opts.clientId}:${this.opts.clientSecret}`).toString("base64");

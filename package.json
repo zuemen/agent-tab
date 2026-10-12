@@ -10,7 +10,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx apps/demo/src/main.ts",
-    "start": "tsx apps/demo/src/main.ts"
+    "start": "tsx apps/demo/src/main.ts",
+    "sandbox:smoke": "tsx scripts/sandbox-smoke.ts"
   },
   "engines": {
     "node": ">=20"

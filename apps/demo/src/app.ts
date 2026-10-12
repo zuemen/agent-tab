@@ -9,6 +9,9 @@ import type { PayPalRail } from "@agent-tab/paypal";
 import { TabService, createApp, type SellerConfig } from "@agent-tab/facilitator";
 import { SELLERS, facilitatorClientFor, prepareSeller, type PreparedSeller } from "@agent-tab/seller-mcp";
 import { connectSeller, runClaudeAgent, runScriptedAgent, type AgentEvent } from "@agent-tab/agent";
+import { SandboxRail } from "@agent-tab/paypal";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { askAssistant, connectPayPalToolkit } from "./assistant.ts";
 import type { PayPalNetwork } from "@agent-tab/x402-paypal";
 
 export const DEMO_TASK =
@@ -114,13 +117,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     const view = service.view(tabId) as { status: string };
     if (view.status !== "active") return c.json({ error: `tab is ${view.status}` }, 409);
 
-    let useClaude = mode !== "scripted" && !!opts.anthropicKey;
-    if (useClaude) {
-      const hourAgo = Date.now() - 3600_000;
-      while (claudeRuns.length && claudeRuns[0]! < hourAgo) claudeRuns.shift();
-      if (claudeRuns.length >= (opts.maxClaudeRunsPerHour ?? 20)) useClaude = false;
-      else claudeRuns.push(Date.now());
-    }
+    const useClaude = mode !== "scripted" && !!opts.anthropicKey && allowClaude();
     session.running = true;
     session.runs++;
     const emit = (ev: AgentEvent) => service.events.emit("event", { tabId, type: "agent", at: Date.now(), detail: ev });
@@ -144,6 +141,46 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
       }
     })();
     return c.json({ started: true, mode: useClaude ? "claude" : "scripted" }, 202);
+  });
+
+  // ---- tab assistant (Claude + PayPal Agent Toolkit) ----
+  let toolkit: { client: Client; at: number } | undefined;
+  const refunded = new Map<string, Map<string, number>>();
+  const allowClaude = () => {
+    const hourAgo = Date.now() - 3600_000;
+    while (claudeRuns.length && claudeRuns[0]! < hourAgo) claudeRuns.shift();
+    if (claudeRuns.length >= (opts.maxClaudeRunsPerHour ?? 20)) return false;
+    claudeRuns.push(Date.now());
+    return true;
+  };
+  app.post("/api/tabs/:id/ask", async (c) => {
+    const tabId = c.req.param("id");
+    if (!service.has(tabId)) return c.json({ error: "unknown tab" }, 404);
+    if (!opts.anthropicKey) return c.json({ error: "The tab assistant needs ANTHROPIC_API_KEY on the server." }, 503);
+    const { question } = (await c.req.json()) as { question?: string };
+    if (!question?.trim() || question.length > 500) return c.json({ error: "Ask a question (max 500 characters)." }, 400);
+    if (!allowClaude()) return c.json({ error: "The assistant is busy; try again later." }, 429);
+    const view = service.view(tabId) as { paypal?: { orderId?: string }; captures?: { status: string; paypalCaptureId?: string; amountCents: number }[] };
+    // Remaining refundable cents per capture, remembered across questions.
+    const caps = refunded.get(tabId) ?? new Map<string, number>();
+    for (const cap of view.captures ?? []) {
+      if (cap.status === "completed" && cap.paypalCaptureId && !caps.has(cap.paypalCaptureId)) caps.set(cap.paypalCaptureId, cap.amountCents);
+    }
+    refunded.set(tabId, caps);
+    if (opts.rail instanceof SandboxRail && (!toolkit || Date.now() - toolkit.at > 30 * 60_000)) {
+      toolkit = { client: await connectPayPalToolkit(await opts.rail.getAccessToken()), at: Date.now() };
+    }
+    const actions: unknown[] = [];
+    const answer = await askAssistant({
+      question,
+      facts: { tabId, ...(view.paypal?.orderId ? { orderId: view.paypal.orderId } : {}), captures: caps, view },
+      ...(toolkit ? { toolkit: toolkit.client } : {}),
+      onEvent: (ev) => {
+        actions.push(ev);
+        service.events.emit("event", { tabId, type: "assistant", at: Date.now(), detail: ev });
+      },
+    });
+    return c.json({ answer, actions, paypalTools: !!toolkit });
   });
 
   const ready = async () => {

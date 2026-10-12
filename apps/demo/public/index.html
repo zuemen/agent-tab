@@ -296,7 +296,7 @@ function alertBox(msg, kind = "err") {
 }
 
 /* ---------------- tab page ---------------- */
-let TAB = null, FEED = [], seenSeq = new Set(), ES = null, RUNNING = false, ANSWER = null;
+let TAB = null, FEED = [], seenSeq = new Set(), ES = null, RUNNING = false, ANSWER = null, ASK = null;
 
 async function renderTab(tabId) {
   TAB = await api("/api/tabs/" + encodeURIComponent(tabId));
@@ -407,6 +407,12 @@ function renderDashboard(q) {
         ${rows.length ? `<table class="ledger"><thead><tr><th>Call</th><th>Seller · item · ledger ref</th><th class="amt">Amount</th></tr></thead><tbody>${rows.map((r) => r.html).join("")}</tbody></table>` : `<div class="empty">No charges yet. ${active ? "Run the agent to start buying." : ""}</div>`}
       </section>
       ${payoutHtml}
+      <section class="slip panel"><div class="panel-head"><h3>Ask about this tab</h3><span class="count">${INFO.agentMode === "claude" ? (INFO.rail === "sandbox" ? "Claude + PayPal Agent Toolkit" : "Claude · ledger only") : "needs a Claude API key"}</span></div>
+        ${INFO.agentMode === "claude" ? `<form id="ask" style="display:flex;gap:10px;padding:14px 18px"><input id="q" class="plain" maxlength="500" placeholder="e.g. What did the panel question cost? Refund it." style="flex:1"><button class="ghost" id="askbtn">Ask</button></form>
+        ${ASK ? `<p class="answer" style="border-top:1px solid var(--rule)"><b>Q:</b> ${esc(ASK.q)}
+
+${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and issues refunds through PayPal. It needs ANTHROPIC_API_KEY on the server.</div>`}
+      </section>
       <section class="slip panel"><div class="panel-head"><h3>Agent activity</h3><span class="count">${INFO.agentMode === "claude" ? "Claude" : "scripted"}</span></div>
         ${FEED.length ? `<ul class="feed" id="feed">${FEED.map(feedItem).join("")}</ul>` : `<div class="empty">The agent's purchases and refusals appear here as they happen.</div>`}
         ${ANSWER ? `<p class="answer">${esc(ANSWER)}</p>` : ""}
@@ -421,6 +427,16 @@ function renderDashboard(q) {
     try { const r = await api("/api/demo/run", { method: "POST", body: JSON.stringify({ tabId: TAB.tabId }) }); RUNNING = true; FEED.push({ type: "start", mode: r.mode }); refresh(); }
     catch (err) { e.target.disabled = false; alertBox(err.message); }
   });
+  const ask = document.getElementById("ask");
+  if (ask) ask.onsubmit = async (e) => {
+    e.preventDefault();
+    const q = document.getElementById("q").value.trim();
+    if (!q) return;
+    const btn = document.getElementById("askbtn");
+    btn.disabled = true; btn.textContent = "Thinking…";
+    try { const r = await api(`/api/tabs/${TAB.tabId}/ask`, { method: "POST", body: JSON.stringify({ question: q }) }); ASK = { q, a: r.answer }; refresh(); }
+    catch (err) { ASK = { q, a: "Error: " + err.message }; refresh(); }
+  };
   on("close", () => act("close"));
   on("revoke", () => act("revoke"));
 }

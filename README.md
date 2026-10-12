@@ -49,12 +49,14 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 | Payments v2 `POST /v2/payments/authorizations/{id}/void` | same | Releases unused budget on close/revoke |
 | Payouts v1 `POST /v1/payments/payouts` | same | Pays each seller its share |
 | `PayPal-Request-Id` on every money-moving call | same | Idempotent retries: a retried capture never captures twice |
-| **PayPal Agent Toolkit** (`@paypal/agent-toolkit`, its MCP server run in-process): `get_order`, `list_transactions`, `create_refund` | `apps/demo/src/assistant.ts` | The tab assistant confirms charges with PayPal and issues refunds |
+| Payments v2 `POST /v2/payments/captures/{id}/refund` | `packages/paypal/src/sandbox.ts` | Refunds of single paid calls, after the owner confirms |
+| Orders v2 `GET /v2/checkout/orders/{id}` | same | Reconciliation: what PayPal actually captured, before any failure is judged |
+| **PayPal Agent Toolkit** (`@paypal/agent-toolkit`, its MCP server run in-process): `get_order` | `apps/demo/src/assistant.ts` | The tab assistant confirms this tab's order and captures with PayPal |
 
 ## Where the AI is
 
 - **The buying agent** (`apps/agent/src/agent.ts`) is Claude with tool use. It sees each seller's tools and prices, decides what is worth buying for the owner's question, pays from the tab, and reports what it bought and why. Refused payments come back as tool errors and the agent explains them instead of working around them.
-- **The tab assistant** (`apps/demo/src/assistant.ts`) answers the owner's questions about the tab ("what did the panel question cost?") and can refund a charge through the PayPal Agent Toolkit, behind a server-side guard: only this tab's own captures, never more than was captured.
+- **The tab assistant** (`apps/demo/src/assistant.ts`) answers the owner's questions about the tab ("what did the panel question cost?"), checks the order with PayPal through the PayPal Agent Toolkit, and can *propose* a refund of a specific call. It never moves money: the owner confirms each refund.
 - Without an `ANTHROPIC_API_KEY`, the demo agent runs a fixed **scripted** purchase plan instead, and the UI says so.
 
 ## What the tab enforces, and where
@@ -64,11 +66,13 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 | Total spend ≤ budget | Facilitator ledger, and ultimately the **PayPal authorization amount**: captures never exceed it |
 | Per-call cap | Facilitator (`checkCharge`) |
 | Seller allowlist | Facilitator |
-| Expiry ≤ 71 hours | Mandate validation. PayPal honors authorized funds for 3 days ([auth honor period](https://developer.paypal.com/docs/checkout/standard/customize/authorization/)), so a tab never relies on funds PayPal no longer guarantees |
+| Expiry ≤ 60 hours | Mandate validation. PayPal honors authorized funds for 3 days ([auth honor period](https://developer.paypal.com/docs/checkout/standard/customize/authorization/)); 60 hours leaves a 12-hour margin for retries |
+| Only the owner manages the tab | An owner key, delivered in the review link's URL fragment and stored only as a hash, is required to set terms, close, revoke, refund, ask the assistant, or follow the live ledger |
 | Charge = seller's actual price and item | The agent signs `{tab, seller, item, amount, nonce, expiry}` with its Ed25519 key; the facilitator rejects anything that differs from the seller's requirements |
 | No replay, no forgery | Nonces are burned on use; only the key on the mandate can sign. The signature protects against sellers and third parties. It does not replace the hard cap, which is the PayPal authorization |
 | Revoke | One call: stop new charges, capture what was used, void the rest |
-| Capture failure | A definitive PayPal error freezes the tab (no new charges). Ambiguous errors (network, 5xx) are retried with the same `PayPal-Request-Id` |
+| Capture failure | Only captures PayPal reports `COMPLETED` (or `PENDING`) count. Before judging a failure, AgentTab reads the order from PayPal and adopts any capture it missed. A definitive refusal freezes the tab; anything else is retried with the same `PayPal-Request-Id` |
+| Refunds | Proposed per paid call (by the owner or the assistant), executed only on the owner's confirmation, and deducted from that seller's payout |
 
 ## Run it
 
@@ -101,7 +105,7 @@ Each demo seller is a Streamable HTTP MCP server at `http://localhost:4020/mcp/<
 ## Tests
 
 ```bash
-npm test          # 46 tests: ledger, PayPal rail, x402 scheme over MCP end to end, demo server, assistant refund guard
+npm test          # 58 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
 npm run typecheck
 ```
 
@@ -113,6 +117,8 @@ The end-to-end tests run the official x402 MCP client and resource server (`@x40
 - **Read-only verify, atomic settle.** As the x402 spec requires, `/verify` never writes. `/settle` checks and records in one step, after the tool succeeded, so a failed tool is never charged.
 - **Write-ahead captures.** The capture record and its `PayPal-Request-Id` are persisted before PayPal is called, so a crash mid-capture is retried idempotently instead of captured twice.
 - **Fees.** With a $10 batch threshold, total fees are about 8.4% of each capture (3.49% + $0.49 on $10), instead of the fixed $0.49 alone being 980% of a single $0.05 call. The demo uses a $0.50 threshold so captures are visible within a short run.
+
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Prior art (searched 2026-10-12)
 
@@ -132,6 +138,8 @@ We did not find a public implementation that combines a single PayPal authorizat
 - **Seller trust.** A seller can settle a charge and return a poor answer. The owner can refund through the tab assistant; disputes beyond that follow PayPal's normal process.
 - **Single process, JSON persistence.** Fine for a demo; a real deployment needs a database.
 - **Tabs longer than 3 days** would need PayPal reauthorization, which is not implemented.
+- **Owner identity.** The owner key travels in the review link, which the requesting agent also receives. PayPal's approval page shows the terms, and the dashboard shows every charge; production would authenticate the owner directly.
+- **Resource binding.** The item name in a charge comes from the seller's payment requirements; the per-call cap and budget are what bound a dishonest seller.
 
 ## Layout
 

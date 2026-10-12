@@ -1,0 +1,15 @@
+{
+  "name": "@agent-tab/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "start": "tsx src/cli.ts" },
+  "dependencies": {
+    "@agent-tab/core": "0.1.0",
+    "@agent-tab/x402-paypal": "0.1.0",
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@x402/mcp": "2.28.0"
+  }
+}

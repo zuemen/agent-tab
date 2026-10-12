@@ -122,7 +122,7 @@ describe("end to end over MCP + x402 + simulated PayPal", () => {
     expect(a.paymentMade).toBe(true);
     expect(a.paymentResponse?.success).toBe(true);
     expect(a.paymentResponse?.transaction).toBe(`${tabId}:1`);
-    expect(JSON.parse((a.content[0] as { text: string }).text).title).toMatch(/Oat milk/);
+    expect(JSON.parse((a.content[0] as unknown as { text: string }).text).title).toMatch(/Oat milk/);
 
     await data.callTool("price_history", { item: "oat_milk" });
     await gazette.callTool("read_article", { id: "pa-0412" });

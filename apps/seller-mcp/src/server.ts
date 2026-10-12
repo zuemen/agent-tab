@@ -13,21 +13,25 @@ export function facilitatorClientFor(url: string, sellerApiKey: string): Facilit
   });
 }
 
-/** One MCP server per seller; paid tools answer with an x402 PaymentRequired until paid. */
-export async function createSellerServer(seller: SellerSpec, facilitator: FacilitatorClient, network: PayPalNetwork): Promise<McpServer> {
+export interface PreparedSeller {
+  seller: SellerSpec;
+  /** A fresh MCP server for this seller (stateless HTTP needs one per request). */
+  newServer(): McpServer;
+}
+
+/**
+ * One MCP server per seller; paid tools answer with an x402 PaymentRequired
+ * until paid. Payment requirements are built once against the facilitator.
+ */
+export async function prepareSeller(seller: SellerSpec, facilitator: FacilitatorClient, network: PayPalNetwork): Promise<PreparedSeller> {
   const resourceServer = new x402ResourceServer(facilitator);
   resourceServer.register(network, new PayPalTabServerScheme());
   await resourceServer.initialize();
 
-  const server = new McpServer({ name: seller.id, version: "0.1.0" }, { instructions: `${seller.name}: ${seller.description} ${DEMO_NOTICE}` });
-
+  const handlers: { tool: SellerSpec["tools"][number]; wrapped?: ReturnType<ReturnType<typeof createPaymentWrapper>> }[] = [];
   for (const tool of seller.tools) {
-    const run = async (args: Record<string, unknown>) => ({
-      content: [{ type: "text" as const, text: JSON.stringify({ seller: seller.name, notice: DEMO_NOTICE, ...(tool.run(args) as object) }) }],
-    });
-    const description = tool.price ? `${tool.description} Paid via PayPal tab.` : tool.description;
     if (!tool.price) {
-      server.registerTool(tool.name, { title: tool.title, description, inputSchema: tool.inputSchema }, run);
+      handlers.push({ tool });
       continue;
     }
     const accepts = await resourceServer.buildPaymentRequirements({
@@ -42,7 +46,29 @@ export async function createSellerServer(seller: SellerSpec, facilitator: Facili
       accepts,
       resource: { url: `mcp://tool/${tool.name}`, description: tool.description, serviceName: seller.name.slice(0, 32) },
     });
-    server.registerTool(tool.name, { title: tool.title, description, inputSchema: tool.inputSchema }, paid(run) as never);
+    handlers.push({ tool, wrapped: paid(runner(seller, tool)) });
   }
-  return server;
+
+  return {
+    seller,
+    newServer() {
+      const server = new McpServer({ name: seller.id, version: "0.1.0" }, { instructions: `${seller.name}: ${seller.description} ${DEMO_NOTICE}` });
+      for (const { tool, wrapped } of handlers) {
+        const description = tool.price ? `${tool.description} Paid via PayPal tab.` : tool.description;
+        const meta = { title: tool.title, description, inputSchema: tool.inputSchema, _meta: { price: tool.price ? `$${tool.price}` : "free", seller: seller.id } };
+        server.registerTool(tool.name, meta, (wrapped ?? runner(seller, tool)) as never);
+      }
+      return server;
+    },
+  };
+}
+
+function runner(seller: SellerSpec, tool: SellerSpec["tools"][number]) {
+  return async (args: Record<string, unknown>) => ({
+    content: [{ type: "text" as const, text: JSON.stringify({ seller: seller.name, notice: DEMO_NOTICE, ...(tool.run(args) as object) }) }],
+  });
+}
+
+export async function createSellerServer(seller: SellerSpec, facilitator: FacilitatorClient, network: PayPalNetwork): Promise<McpServer> {
+  return (await prepareSeller(seller, facilitator, network)).newServer();
 }

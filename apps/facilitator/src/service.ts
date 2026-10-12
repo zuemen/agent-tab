@@ -178,12 +178,14 @@ export class TabService {
     if (unknown.length) throw new Error(`unknown sellers: ${unknown.join(", ")}`);
     const hours = Number(terms.expiresInHours);
     if (!(hours > 0)) throw new Error("expiresInHours must be positive");
+    const budgetMicros = parseUsd(terms.budgetUsd);
     return {
       tabId: request.tabId,
       currency: "USD",
-      budgetMicros: parseUsd(terms.budgetUsd),
+      budgetMicros,
       perCallCapMicros: parseUsd(terms.perCallCapUsd),
-      captureThresholdMicros: parseUsd(terms.captureThresholdUsd),
+      // A threshold above the budget just means "capture once, at close".
+      captureThresholdMicros: Math.min(parseUsd(terms.captureThresholdUsd), budgetMicros),
       allowedSellers: terms.sellers,
       expiresAt: this.now() + Math.round(hours * HOUR_MS),
       agentPublicKey: request.agentPublicKey,

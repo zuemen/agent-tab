@@ -1,0 +1,26 @@
+# One-click deploy on Render (Blueprint). Secrets are entered in the Render dashboard, never committed.
+services:
+  - type: web
+    name: agent-tab
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev
+    startCommand: npm start
+    healthCheckPath: /api/demo/info
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PUBLIC_URL
+        sync: false # e.g. https://agent-tab.onrender.com (PayPal redirects back here)
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYOUT_RECEIVER
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MAX_CLAUDE_RUNS_PER_HOUR
+        value: "20"
+      - key: PLATFORM_FEE_BPS
+        value: "1000"

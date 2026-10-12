@@ -21,5 +21,7 @@
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"
-  }
+  },
+  "license": "Apache-2.0",
+  "description": "AgentTab: a PayPal-authorized spending tab for AI agents (x402-compatible paid MCP tools settled via PayPal authorize + batched capture)."
 }

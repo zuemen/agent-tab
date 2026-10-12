@@ -1,8 +1,13 @@
 import { MICROS_PER_CENT } from "./money.ts";
 
-export const DAY_MS = 24 * 60 * 60 * 1000;
-/** PayPal authorizations are valid for 29 days; keep a one-day margin. */
-export const MAX_TAB_LIFETIME_MS = 28 * DAY_MS;
+export const HOUR_MS = 60 * 60 * 1000;
+export const DAY_MS = 24 * HOUR_MS;
+/**
+ * PayPal authorizations stay valid for 29 days, but funds are only honored for
+ * the first 3 days. A tab must finish inside the honor period (with a margin),
+ * so captures never depend on funds PayPal no longer guarantees.
+ */
+export const MAX_TAB_LIFETIME_MS = 71 * HOUR_MS;
 
 /** What the human approves before the agent may spend anything. */
 export interface Mandate {
@@ -35,7 +40,7 @@ export function validateMandate(m: Mandate, now: number): string[] {
   if (m.allowedSellers.length === 0) problems.push("at least one seller must be allowed");
   if (new Set(m.allowedSellers).size !== m.allowedSellers.length) problems.push("duplicate sellers");
   if (!(m.expiresAt > now)) problems.push("expiry must be in the future");
-  if (m.expiresAt - now > MAX_TAB_LIFETIME_MS) problems.push("expiry must be within 28 days (PayPal authorizations last 29)");
+  if (m.expiresAt - now > MAX_TAB_LIFETIME_MS) problems.push("expiry must be within 71 hours (PayPal honors authorized funds for 3 days)");
   if (!/^[A-Za-z0-9_-]{43}$/.test(m.agentPublicKey)) problems.push("agentPublicKey must be a base64url Ed25519 key");
   return problems;
 }

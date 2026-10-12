@@ -75,11 +75,11 @@ describe("mandate validation", () => {
   });
   it("rejects budgets in fractional cents, caps above budget, long expiry, empty sellers", () => {
     const problems = validateMandate(
-      mandate({ budgetMicros: 1_000_001, perCallCapMicros: 2_000_000, expiresAt: T0 + 30 * DAY_MS, allowedSellers: [] }),
+      mandate({ budgetMicros: 1_000_001, perCallCapMicros: 2_000_000, expiresAt: T0 + 3 * DAY_MS, allowedSellers: [] }),
       T0,
     );
     expect(problems.join("|")).toMatch(/budget/);
-    expect(problems.join("|")).toMatch(/28 days/);
+    expect(problems.join("|")).toMatch(/71 hours/);
     expect(problems.join("|")).toMatch(/seller/);
   });
 });

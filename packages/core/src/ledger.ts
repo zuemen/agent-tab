@@ -127,9 +127,12 @@ export interface TabTotals {
   callCount: number;
 }
 
-export function totals(tab: TabState): TabTotals {
+/** `now` excludes reservations that have lapsed without mutating the tab. */
+export function totals(tab: TabState, now?: number): TabTotals {
   const settledMicros = tab.entries.reduce((s, e) => s + e.amountMicros, 0);
-  const reservedMicros = Object.values(tab.reservations).reduce((s, r) => s + r.amountMicros, 0);
+  const reservedMicros = Object.values(tab.reservations)
+    .filter((r) => now === undefined || r.expiresAt > now)
+    .reduce((s, r) => s + r.amountMicros, 0);
   const capturedCents = tab.captures.filter((c) => c.status !== "failed").reduce((s, c) => s + c.amountCents, 0);
   return {
     budgetMicros: tab.mandate.budgetMicros,
@@ -163,11 +166,10 @@ export interface ExpectedTerms {
 }
 
 /**
- * Check a signed charge against the mandate and hold its amount.
+ * Read-only: would this signed charge be accepted right now?
  * `expected` is what the seller is actually asking for; the charge must match it exactly.
  */
-export function reserve(tab: TabState, signed: SignedTabCharge, now: number, expected?: ExpectedTerms): Result<Reservation> {
-  pruneExpired(tab, now);
+export function checkCharge(tab: TabState, signed: SignedTabCharge, now: number, expected?: ExpectedTerms): Result<null> {
   const m = tab.mandate;
   const c = signed.charge;
   if (tab.status !== "active") return reject("TAB_NOT_ACTIVE", `tab is ${tab.status}`);
@@ -185,8 +187,16 @@ export function reserve(tab: TabState, signed: SignedTabCharge, now: number, exp
   if (expected && (expected.seller !== c.seller || expected.resource !== c.resource || expected.amountMicros !== c.amountMicros)) {
     return reject("TERMS_MISMATCH", "charge does not match the seller's price or resource");
   }
-  if (c.amountMicros > totals(tab).remainingMicros) return reject("OVER_BUDGET", "charge would exceed the remaining budget");
+  if (c.amountMicros > totals(tab, now).remainingMicros) return reject("OVER_BUDGET", "charge would exceed the remaining budget");
+  return { ok: true, value: null };
+}
 
+/** Check a signed charge and hold its amount until settle() or release(). */
+export function reserve(tab: TabState, signed: SignedTabCharge, now: number, expected?: ExpectedTerms): Result<Reservation> {
+  pruneExpired(tab, now);
+  const check = checkCharge(tab, signed, now, expected);
+  if (!check.ok) return check;
+  const c = signed.charge;
   const reservation: Reservation = {
     nonce: c.nonce,
     seller: c.seller,

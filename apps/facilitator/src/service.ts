@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   HOUR_MS,
   MAX_TAB_LIFETIME_MS,
@@ -9,6 +9,7 @@ import {
   beginCapture,
   beginClose,
   checkCharge,
+  planRefund,
   completeCapture,
   computePayouts,
   createTab,
@@ -24,6 +25,7 @@ import {
   type CloseReason,
   type ExpectedTerms,
   type Mandate,
+  type RefundRecord,
   type RejectCode,
   type TabState,
 } from "@agent-tab/core";
@@ -67,12 +69,55 @@ export interface TabRequest {
   agentName: string;
   suggested: TabTerms;
   createdAt: number;
+  /** sha256 of the owner key. The key itself is only ever given to the human. */
+  ownerKeyHash: string;
 }
 
 interface TabRecord {
   request: TabRequest;
   state?: TabState;
   cancelled?: boolean;
+  /** Payout emails fixed when the human approved, so config changes cannot redirect them. */
+  payoutReceivers?: Record<string, string>;
+  /** Shown to the owner, e.g. why PayPal did not open the tab. */
+  notice?: string;
+}
+
+/** PayPal errors after which retrying the same capture cannot succeed. */
+const DEFINITIVE_CAPTURE_ERRORS = new Set([
+  "AUTHORIZATION_EXPIRED",
+  "AUTHORIZATION_VOIDED",
+  "AUTHORIZATION_ALREADY_CAPTURED",
+  "AUTHORIZATION_ALREADY_COMPLETED",
+  "PREVIOUSLY_CAPTURED",
+  "PREVIOUSLY_VOIDED",
+  "MAX_CAPTURE_AMOUNT_EXCEEDED",
+  "MAX_CAPTURE_COUNT_EXCEEDED",
+  "DECLINED",
+  "FAILED",
+]);
+/** Void errors that mean there is nothing left to release. */
+const NOTHING_TO_VOID = new Set([
+  "PREVIOUSLY_CAPTURED",
+  "AUTHORIZATION_ALREADY_CAPTURED",
+  "AUTHORIZATION_VOIDED",
+  "PREVIOUSLY_VOIDED",
+  "AUTHORIZATION_EXPIRED",
+  "AUTHORIZATION_ALREADY_COMPLETED",
+]);
+
+function isDefinitive(e: unknown): boolean {
+  return e instanceof PayPalError && (e.httpStatus === 422 || DEFINITIVE_CAPTURE_ERRORS.has(e.code));
+}
+
+const hashKey = (key: string) => createHash("sha256").update(key).digest();
+
+/** A problem with the caller's request; safe to show to them. */
+export class UserError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = "UserError";
+  }
 }
 
 export type TabEvent = { tabId: string; type: string; at: number; detail?: Record<string, unknown> };
@@ -154,11 +199,20 @@ export class TabService {
   // ---------- tab lifecycle ----------
 
   /** Step 1 (agent): ask for a tab. Nothing is authorized yet. */
-  requestTab(input: { agentPublicKey: string; purpose: string; agentName?: string; suggested?: Partial<TabTerms> }): { tabId: string; reviewUrl: string } {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(input.agentPublicKey)) throw new Error("agentPublicKey must be a base64url Ed25519 key");
+  requestTab(input: { agentPublicKey: string; purpose: string; agentName?: string; suggested?: Partial<TabTerms> }): { tabId: string; reviewUrl: string; ownerKey: string } {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(String(input.agentPublicKey))) throw new UserError("agentPublicKey must be a base64url Ed25519 key");
     const tabId = `tab_${randomBytes(9).toString("base64url")}`;
-    const suggested: TabTerms = { ...DEFAULT_TERMS, ...input.suggested };
-    if (!suggested.sellers.length) suggested.sellers = this.config.sellers.map((s) => s.id);
+    const ownerKey = randomBytes(24).toString("base64url");
+    const s = input.suggested ?? {};
+    const str = (v: unknown, d: string) => (typeof v === "string" && v.length <= 16 ? v : d);
+    const suggested: TabTerms = {
+      budgetUsd: str(s.budgetUsd, DEFAULT_TERMS.budgetUsd),
+      perCallCapUsd: str(s.perCallCapUsd, DEFAULT_TERMS.perCallCapUsd),
+      captureThresholdUsd: str(s.captureThresholdUsd, DEFAULT_TERMS.captureThresholdUsd),
+      expiresInHours: Number.isFinite(Number(s.expiresInHours)) ? Number(s.expiresInHours) : DEFAULT_TERMS.expiresInHours,
+      sellers: Array.isArray(s.sellers) ? s.sellers.filter((x): x is string => typeof x === "string" && this.sellers.has(x)).slice(0, 20) : [],
+    };
+    if (!suggested.sellers.length) suggested.sellers = this.config.sellers.map((x) => x.id);
     const request: TabRequest = {
       tabId,
       agentPublicKey: input.agentPublicKey,
@@ -166,26 +220,45 @@ export class TabService {
       agentName: String(input.agentName ?? "AI agent").slice(0, 80),
       suggested,
       createdAt: this.now(),
+      ownerKeyHash: hashKey(ownerKey).toString("base64url"),
     };
     this.tabs.set(tabId, { request });
     this.persist();
     this.emit(tabId, "tab_requested", { purpose: request.purpose });
-    return { tabId, reviewUrl: `${this.config.publicUrl}/tab/${tabId}` };
+    // The owner key rides in the URL fragment: browsers never send it to servers or in Referer.
+    return { tabId, reviewUrl: `${this.config.publicUrl}/tab/${tabId}#owner=${ownerKey}`, ownerKey };
+  }
+
+  /** Only the holder of the owner key may set terms, close, revoke, ask, or refund. */
+  isOwner(tabId: string, key: string | undefined): boolean {
+    const rec = this.tabs.get(tabId);
+    if (!rec || !key) return false;
+    const want = Buffer.from(rec.request.ownerKeyHash, "base64url");
+    const got = hashKey(key);
+    return want.length === got.length && timingSafeEqual(want, got);
   }
 
   termsToMandate(request: TabRequest, terms: TabTerms): Mandate {
+    if (!Array.isArray(terms.sellers) || terms.sellers.length > 20) throw new UserError("sellers must be a list");
     const unknown = terms.sellers.filter((s) => !this.sellers.has(s));
-    if (unknown.length) throw new Error(`unknown sellers: ${unknown.join(", ")}`);
+    if (unknown.length) throw new UserError(`unknown sellers: ${unknown.join(", ")}`);
     const hours = Number(terms.expiresInHours);
-    if (!(hours > 0)) throw new Error("expiresInHours must be positive");
-    const budgetMicros = parseUsd(terms.budgetUsd);
+    if (!(hours > 0)) throw new UserError("expiresInHours must be positive");
+    const usd = (v: unknown, field: string) => {
+      try {
+        return parseUsd(String(v));
+      } catch {
+        throw new UserError(`${field} must be a dollar amount like 1.50`);
+      }
+    };
+    const budgetMicros = usd(terms.budgetUsd, "budget");
     return {
       tabId: request.tabId,
       currency: "USD",
       budgetMicros,
-      perCallCapMicros: parseUsd(terms.perCallCapUsd),
+      perCallCapMicros: usd(terms.perCallCapUsd, "per-call cap"),
       // A threshold above the budget just means "capture once, at close".
-      captureThresholdMicros: Math.min(parseUsd(terms.captureThresholdUsd), budgetMicros),
+      captureThresholdMicros: Math.min(usd(terms.captureThresholdUsd, "capture threshold"), budgetMicros),
       allowedSellers: terms.sellers,
       expiresAt: this.now() + Math.round(hours * HOUR_MS),
       agentPublicKey: request.agentPublicKey,
@@ -197,21 +270,24 @@ export class TabService {
   async approveTerms(tabId: string, terms: TabTerms): Promise<{ approveUrl: string }> {
     return this.withLock(tabId, async () => {
       const rec = this.mustGet(tabId);
-      if (rec.state || rec.cancelled) throw new Error("this tab already has terms");
+      if (rec.state || rec.cancelled) throw new UserError("this tab already has terms");
       const mandate = this.termsToMandate(rec.request, terms);
       const problems = validateMandate(mandate, this.now());
-      if (problems.length) throw new Error(problems.join("; "));
+      if (problems.length) throw new UserError(problems.join("; "));
       const state = createTab(mandate, this.now());
+      // The terms also appear on PayPal's own approval page, so the human sees them where they approve.
+      const n = mandate.allowedSellers.length;
       const order = await this.rail.createAuthorizeOrder({
         tabId,
         amountCents: mandate.budgetMicros / 10_000,
-        description: `AgentTab budget for ${rec.request.agentName}`,
+        description: `AgentTab: max $${formatUsd(mandate.perCallCapMicros)}/call, ${n} seller${n === 1 ? "" : "s"}, ${Math.round(Number(terms.expiresInHours))}h`,
         returnUrl: `${this.config.publicUrl}/paypal/return`,
         cancelUrl: `${this.config.publicUrl}/paypal/cancel`,
         requestId: `${tabId}-order`,
       });
       state.paypalOrderId = order.orderId;
       rec.state = state;
+      rec.payoutReceivers = Object.fromEntries(mandate.allowedSellers.map((id) => [id, this.sellers.get(id)!.payoutReceiver]));
       this.persist();
       this.emit(tabId, "order_created", { orderId: order.orderId });
       return { approveUrl: order.approveUrl };
@@ -225,12 +301,22 @@ export class TabService {
   /** Step 3 (PayPal redirect): the human approved; authorize the order and open the tab. */
   async onApproved(orderId: string): Promise<string> {
     const rec = this.findByOrder(orderId);
-    if (!rec?.state) throw new Error("unknown PayPal order");
+    if (!rec?.state) throw new UserError("unknown PayPal order");
     const tabId = rec.request.tabId;
     return this.withLock(tabId, async () => {
       const state = rec.state!;
       if (state.status !== "awaiting_approval") return tabId; // repeated redirect
       const auth = await this.rail.authorizeOrder(orderId, `${tabId}-authorize`);
+      if (auth.status !== "CREATED") {
+        // DENIED or PENDING (under review): funds are not guaranteed, so the tab never opens.
+        if (auth.status === "PENDING") await this.rail.voidAuthorization(auth.authorizationId, `${tabId}-void`).catch(() => undefined);
+        beginClose(state, "closed_by_user");
+        rec.cancelled = true;
+        rec.notice = `PayPal returned authorization status ${auth.status}; the tab was not opened and nothing will be charged.`;
+        this.persist();
+        this.emit(tabId, "tab_cancelled", { authorizationStatus: auth.status });
+        return tabId;
+      }
       activateTab(state, { paypalOrderId: orderId, authorizationId: auth.authorizationId, authorizationExpiresAt: auth.expiresAt });
       this.persist();
       this.emit(tabId, "tab_active", { authorizationId: auth.authorizationId, budget: formatUsd(state.mandate.budgetMicros) });
@@ -324,7 +410,7 @@ export class TabService {
       spent: formatUsd(t.settledMicros),
       remaining: formatUsd(t.remainingMicros),
     });
-    void this.maybeCapture(tab.mandate.tabId);
+    this.maybeCapture(tab.mandate.tabId).catch((err) => console.error("capture", tab.mandate.tabId, err));
     return {
       success: true,
       transaction: `${tab.mandate.tabId}:${entry.value.seq}`,
@@ -347,15 +433,49 @@ export class TabService {
   }
 
   /**
+   * Ask PayPal what it actually captured on this order and adopt any capture
+   * our records missed (matched by invoice id). PayPal is the source of truth.
+   */
+  private async reconcile(tab: TabState): Promise<void> {
+    if (!tab.paypalOrderId) return;
+    let found;
+    try {
+      found = await this.rail.getOrderCaptures(tab.paypalOrderId);
+    } catch {
+      return; // keep local state; try again later
+    }
+    const tabId = tab.mandate.tabId;
+    for (const rec of tab.captures) {
+      const pp = found.find((c) => c.invoiceId === `${tabId}-${rec.id}`);
+      if (!pp) continue;
+      const counts = pp.status === "COMPLETED" || pp.status === "PENDING";
+      if (counts && rec.status !== "completed") {
+        rec.status = "completed";
+        delete rec.error;
+        this.emit(tabId, "capture_reconciled", { id: rec.id, captureId: pp.captureId, status: pp.status });
+      }
+      if (counts) {
+        rec.paypalCaptureId = pp.captureId;
+        rec.paypalStatus = pp.status;
+      }
+    }
+    this.persist();
+  }
+
+  /**
    * One capture attempt. The capture record (with its PayPal-Request-Id) is
-   * persisted before PayPal is called. Ambiguous failures (network, 5xx) keep
-   * the record pending and are retried with the same Request-Id, so PayPal's
-   * idempotency guarantees no double capture. Definitive failures freeze the tab.
+   * persisted before PayPal is called. Unclear failures (network, 5xx, auth
+   * problems on our side) keep the record pending and are retried with the same
+   * Request-Id after checking PayPal, so nothing is captured twice. Only a
+   * definitive refusal, confirmed against PayPal's records, freezes the tab.
    */
   private async runCapture(tab: TabState, final: boolean): Promise<void> {
     const tabId = tab.mandate.tabId;
     let rec = tab.captures.find((c) => c.status === "pending");
-    if (!rec) {
+    if (rec) {
+      await this.reconcile(tab);
+      if (rec.status !== "pending") return;
+    } else {
       const cents = planCapture(tab, final);
       if (!cents) return;
       rec = beginCapture(tab, cents, final, this.now());
@@ -369,14 +489,21 @@ export class TabService {
         final: rec.final,
         requestId: rec.requestId,
         invoiceId: `${tabId}-${rec.id}`,
-        noteToPayer: `AgentTab: ${tab.entries.length} paid tool calls so far`,
+        // Fixed per record: a retry must send the same body as the first attempt.
+        noteToPayer: `AgentTab usage capture ${rec.id}`,
       });
+      if (result.status !== "COMPLETED" && result.status !== "PENDING") {
+        throw new PayPalError(`capture returned status ${result.status}`, 422, result.status);
+      }
       completeCapture(tab, rec.id, result.captureId);
+      rec.paypalStatus = result.status;
       this.persist();
       this.emit(tabId, "capture_completed", { id: rec.id, captureId: result.captureId, status: result.status, amount: formatUsd(rec.amountCents * 10_000) });
     } catch (err) {
-      const e = err as PayPalError;
-      if (e instanceof PayPalError && !e.retryable) {
+      if (isDefinitive(err)) {
+        await this.reconcile(tab); // did PayPal take the money anyway?
+        if (rec.status === "completed") return;
+        const e = err as PayPalError;
         failCapture(tab, rec.id, `${e.code}: ${e.message}`);
         beginClose(tab, "capture_failed");
         this.persist();
@@ -391,7 +518,8 @@ export class TabService {
 
   /**
    * Close (or revoke) the tab: stop new charges, capture what was used, release
-   * the rest of the authorization, then pay sellers their share.
+   * the rest of the authorization, then pay sellers their share. Any step that
+   * fails for a temporary reason leaves the tab "closing"; sweep() resumes it.
    */
   close(tabId: string, reason: CloseReason): Promise<ReturnType<TabService["view"]>> {
     return this.withLock(tabId, async () => {
@@ -409,35 +537,53 @@ export class TabService {
       this.emit(tabId, "tab_closing", { reason });
       if ((tab.status as TabState["status"]) === "closed") return this.view(tabId); // was never authorized
 
+      // 1. Capture: finish anything in flight, then the remainder.
+      await this.reconcile(tab);
       if (tab.captures.some((c) => c.status === "pending")) await this.runCapture(tab, false);
-      if (tab.captures.some((c) => c.status === "pending")) return this.view(tabId); // retry later
-
+      if (tab.captures.some((c) => c.status === "pending")) return this.view(tabId);
       await this.runCapture(tab, true);
       if (tab.captures.some((c) => c.status === "pending")) return this.view(tabId);
 
-      const finalDone = tab.captures.some((c) => c.final && c.status === "completed");
-      let voided = false;
-      if (!finalDone && tab.authorizationId) {
-        try {
-          await this.rail.voidAuthorization(tab.authorizationId, `${tabId}-void`);
-          voided = true;
-          this.emit(tabId, "authorization_voided");
-        } catch (err) {
-          this.emit(tabId, "void_failed", { error: String((err as Error).message) });
+      // 2. Release the unused part of the authorization.
+      if (tab.voidStatus !== "voided" && tab.voidStatus !== "not_needed") {
+        if (tab.captures.some((c) => c.final && c.status === "completed") || !tab.authorizationId) {
+          tab.voidStatus = "not_needed";
+        } else {
+          try {
+            await this.rail.voidAuthorization(tab.authorizationId, `${tabId}-void`);
+            tab.voidStatus = "voided";
+            tab.voided = true;
+            this.emit(tabId, "authorization_voided");
+          } catch (err) {
+            if (err instanceof PayPalError && NOTHING_TO_VOID.has(err.code)) {
+              tab.voidStatus = "not_needed";
+            } else {
+              tab.voidStatus = "failed";
+              this.persist();
+              this.emit(tabId, "void_failed", { error: String((err as Error).message) });
+              return this.view(tabId); // retried by sweep
+            }
+          }
         }
+        this.persist();
       }
 
-      if (!tab.payout) {
-        const payout = computePayouts(tab, this.config.platformFeeBps);
+      // 3. Pay sellers, once PayPal reports every capture COMPLETED.
+      if (tab.captures.some((c) => c.status === "completed" && c.paypalStatus === "PENDING")) {
+        this.emit(tabId, "payout_waiting", { reason: "a capture is still PENDING at PayPal" });
+        return this.view(tabId);
+      }
+      if (!tab.payout || tab.payout.status === "pending") {
+        const payout = tab.payout ?? computePayouts(tab, this.config.platformFeeBps);
         tab.payout = payout;
-        this.persist();
+        this.persist(); // write-ahead: a restart retries the same batch id
         if (payout.lines.length) {
           try {
             const res = await this.rail.createPayouts({
               batchId: `${tabId}-payout`,
               emailSubject: "You were paid by an AI agent via AgentTab",
               items: payout.lines.map((l) => ({
-                receiver: this.sellers.get(l.seller)?.payoutReceiver ?? "",
+                receiver: rec.payoutReceivers?.[l.seller] ?? this.sellers.get(l.seller)?.payoutReceiver ?? "",
                 amountCents: l.amountCents,
                 note: `Paid tool calls on ${tabId}`,
                 itemId: `${tabId}-${l.seller}`,
@@ -447,32 +593,105 @@ export class TabService {
             payout.batchId = res.payoutBatchId;
             this.emit(tabId, "payout_sent", { batchId: res.payoutBatchId, lines: payout.lines });
           } catch (err) {
-            payout.status = "failed";
-            payout.error = String((err as Error).message);
-            this.emit(tabId, "payout_failed", { error: payout.error });
+            if (err instanceof PayPalError && !err.retryable && err.httpStatus !== 401 && err.httpStatus !== 403) {
+              payout.status = "failed";
+              payout.error = String(err.message);
+              this.emit(tabId, "payout_failed", { error: payout.error });
+            } else {
+              this.persist();
+              this.emit(tabId, "payout_retry_pending", { error: String((err as Error).message) });
+              return this.view(tabId); // retried by sweep
+            }
           }
         } else {
           payout.status = "completed";
         }
       }
-      markClosed(tab, voided);
+      markClosed(tab, tab.voidStatus === "voided");
       this.persist();
       this.emit(tabId, "tab_closed", { reason: tab.closeReason });
       return this.view(tabId);
     });
   }
 
-  /** Close tabs whose mandate expired; retry stuck captures. Call periodically. */
+  // ---------- refunds (proposed by the assistant, confirmed by the owner) ----------
+
+  proposeRefund(tabId: string, entrySeq: number, reason: string): RefundRecord {
+    const tab = this.mustGet(tabId).state;
+    if (!tab) throw new UserError("this tab has no charges");
+    const plan = planRefund(tab, entrySeq);
+    if (!plan.ok) throw new UserError(plan.message);
+    tab.refunds ??= [];
+    const n = tab.refunds.length + 1;
+    const refund: RefundRecord = {
+      id: `ref_${n}`,
+      entrySeq,
+      seller: plan.value.seller,
+      amountCents: plan.value.amountCents,
+      paypalCaptureId: plan.value.paypalCaptureId,
+      requestId: `${tabId}-refund-${n}`,
+      reason: String(reason ?? "").slice(0, 200),
+      status: "proposed",
+      createdAt: this.now(),
+    };
+    tab.refunds.push(refund);
+    this.persist();
+    this.emit(tabId, "refund_proposed", { id: refund.id, entrySeq, amount: formatUsd(refund.amountCents * 10_000) });
+    return refund;
+  }
+
+  /** Execute a proposed refund. Re-confirming a pending one retries with the same PayPal-Request-Id. */
+  confirmRefund(tabId: string, refundId: string): Promise<RefundRecord> {
+    return this.withLock(tabId, async () => {
+      const tab = this.mustGet(tabId).state;
+      const refund = tab?.refunds?.find((r) => r.id === refundId);
+      if (!tab || !refund) throw new UserError("unknown refund");
+      if (refund.status === "completed" || refund.status === "failed") return refund;
+      refund.status = "pending";
+      refund.afterPayout = !!tab.payout;
+      this.persist();
+      try {
+        const res = await this.rail.refundCapture({
+          captureId: refund.paypalCaptureId,
+          amountCents: refund.amountCents,
+          requestId: refund.requestId,
+          noteToPayer: `AgentTab refund: paid call #${refund.entrySeq}`,
+        });
+        refund.status = "completed";
+        refund.paypalRefundId = res.refundId;
+        this.emit(tabId, "refund_completed", { id: refund.id, refundId: res.refundId, amount: formatUsd(refund.amountCents * 10_000) });
+      } catch (err) {
+        if (isDefinitive(err)) {
+          refund.status = "failed";
+          refund.error = String((err as Error).message);
+          this.emit(tabId, "refund_failed", { id: refund.id, error: refund.error });
+        } else {
+          this.emit(tabId, "refund_retry_pending", { id: refund.id, error: String((err as Error).message) });
+        }
+      }
+      this.persist();
+      return refund;
+    });
+  }
+
+  /** Close expired tabs, resume interrupted closes, retry stuck captures, refresh PENDING captures. Call periodically. */
   async sweep(): Promise<void> {
     const now = this.now();
     for (const rec of this.tabs.values()) {
       const tab = rec.state;
       if (!tab) continue;
-      const expiry = Math.min(tab.mandate.expiresAt, tab.authorizationExpiresAt ?? Infinity);
-      if ((tab.status === "active" && now >= expiry) || tab.status === "closing") {
-        await this.close(tab.mandate.tabId, "expired");
-      } else if (tab.status === "active" && tab.captures.some((c) => c.status === "pending")) {
-        await this.maybeCapture(tab.mandate.tabId);
+      const tabId = tab.mandate.tabId;
+      try {
+        const expiry = Math.min(tab.mandate.expiresAt, tab.authorizationExpiresAt ?? Infinity);
+        if ((tab.status === "active" && now >= expiry) || tab.status === "closing") {
+          await this.close(tabId, "expired");
+        } else if (tab.status === "active" && tab.captures.some((c) => c.status === "pending")) {
+          await this.maybeCapture(tabId);
+        } else if (tab.captures.some((c) => c.paypalStatus === "PENDING")) {
+          await this.withLock(tabId, () => this.reconcile(tab));
+        }
+      } catch (err) {
+        console.error("sweep", tabId, err);
       }
     }
   }
@@ -481,12 +700,22 @@ export class TabService {
 
   private mustGet(tabId: string): TabRecord {
     const rec = this.tabs.get(tabId);
-    if (!rec) throw new Error("unknown tab");
+    if (!rec) throw new UserError("unknown tab", 404);
     return rec;
   }
 
   has(tabId: string): boolean {
     return this.tabs.has(tabId);
+  }
+
+  /** What anyone holding the tab id (agent, seller) may see. */
+  publicView(tabId: string) {
+    const rec = this.mustGet(tabId);
+    const tab = rec.state;
+    const status = rec.cancelled ? "cancelled" : tab ? tab.status : "requested";
+    if (!tab) return { tabId, status };
+    const t = totals(tab);
+    return { tabId, status, remaining: formatUsd(Math.max(0, t.remainingMicros)), perCallCap: formatUsd(tab.mandate.perCallCapMicros), allowedSellers: tab.mandate.allowedSellers };
   }
 
   view(tabId: string) {
@@ -502,7 +731,7 @@ export class TabService {
       sellers: this.publicSellers(),
       maxLifetimeHours: MAX_TAB_LIFETIME_MS / HOUR_MS,
     };
-    if (!tab) return { ...base, status: rec.cancelled ? "cancelled" : "requested" };
+    if (!tab) return { ...base, status: rec.cancelled ? "cancelled" : "requested", ...(rec.notice ? { notice: rec.notice } : {}) };
     const t = totals(tab);
     return {
       ...base,
@@ -520,7 +749,10 @@ export class TabService {
         authorizationId: tab.authorizationId,
         authorizationExpiresAt: tab.authorizationExpiresAt ? new Date(tab.authorizationExpiresAt).toISOString() : undefined,
         voided: tab.voided,
+        voidStatus: tab.voidStatus,
       },
+      ...(rec.notice ? { notice: rec.notice } : {}),
+      refunds: (tab.refunds ?? []).map((r) => ({ ...r, amount: formatUsd(r.amountCents * 10_000) })),
       totals: {
         spent: formatUsd(t.settledMicros),
         remaining: formatUsd(Math.max(0, t.remainingMicros)),

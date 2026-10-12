@@ -61,6 +61,26 @@ export interface PayoutResult {
   status: string;
 }
 
+/** A capture as PayPal reports it on the order (for reconciliation). */
+export interface OrderCapture {
+  captureId: string;
+  status: string;
+  amountCents: number;
+  invoiceId?: string;
+}
+
+export interface RefundInput {
+  captureId: string;
+  amountCents: number;
+  requestId: string;
+  noteToPayer?: string;
+}
+
+export interface RefundResult {
+  refundId: string;
+  status: string;
+}
+
 export interface PayPalRail {
   readonly mode: RailMode;
   createAuthorizeOrder(input: CreateAuthorizeOrderInput): Promise<CreatedOrder>;
@@ -68,6 +88,9 @@ export interface PayPalRail {
   captureAuthorization(input: CaptureInput): Promise<CaptureResult>;
   voidAuthorization(authorizationId: string, requestId: string): Promise<void>;
   createPayouts(input: PayoutInput): Promise<PayoutResult>;
+  /** What PayPal actually captured on this order; the source of truth after an unclear failure. */
+  getOrderCaptures(orderId: string): Promise<OrderCapture[]>;
+  refundCapture(input: RefundInput): Promise<RefundResult>;
 }
 
 /** A PayPal API failure, carrying PayPal's error name and debug id when present. */

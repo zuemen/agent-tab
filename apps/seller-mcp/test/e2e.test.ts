@@ -23,6 +23,8 @@ let rail: SimulatedRail;
 let service: TabService;
 let keys: AgentKeyPair;
 let tab: TabSigner | undefined;
+let owner = "";
+const H = () => ({ "content-type": "application/json", "x-agenttab-owner": owner });
 const clients: x402MCPClient[] = [];
 
 async function connect(sellerId: string): Promise<x402MCPClient> {
@@ -47,10 +49,11 @@ async function openTab(terms: Partial<{ budgetUsd: string; perCallCapUsd: string
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ agentPublicKey: keys.publicKey, purpose: "Research an oat cold brew launch", agentName: "Test agent" }),
-  }).then((r) => r.json() as Promise<{ tabId: string }>);
+  }).then((r) => r.json() as Promise<{ tabId: string; reviewUrl: string }>);
+  owner = new URL(req.reviewUrl).hash.replace("#owner=", "");
   const approve = await fetch(`${base}/api/tabs/${req.tabId}/terms`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: H(),
     body: JSON.stringify({
       budgetUsd: "2.00",
       perCallCapUsd: "0.50",
@@ -70,7 +73,7 @@ async function openTab(terms: Partial<{ budgetUsd: string; perCallCapUsd: string
 }
 
 async function view(tabId: string) {
-  return fetch(`${base}/api/tabs/${tabId}`).then((r) => r.json()) as Promise<any>;
+  return fetch(`${base}/api/tabs/${tabId}`, { headers: H() }).then((r) => r.json()) as Promise<any>;
 }
 
 beforeEach(async () => {
@@ -136,7 +139,7 @@ describe("end to end over MCP + x402 + simulated PayPal", () => {
     await panel.callTool("ask_panel", { question: "Would you buy an oat cold brew under $5?" });
     await data.callTool("competitor_menu", { area: "Harbor Street" });
 
-    v = await fetch(`${base}/api/tabs/${tabId}/close`, { method: "POST" }).then((r) => r.json());
+    v = await fetch(`${base}/api/tabs/${tabId}/close`, { method: "POST", headers: H(), body: "{}" }).then((r) => r.json());
     expect(v.status).toBe("closed");
     expect(v.totals.spent).toBe("0.77");
     expect(v.totals.captured).toBe("0.77");
@@ -162,7 +165,7 @@ describe("end to end over MCP + x402 + simulated PayPal", () => {
     const gazette = await connect("harbor-gazette");
     await gazette.callTool("read_article", { id: "pa-0419" });
     await gazette.callTool("read_article", { id: "pa-0412" });
-    const v = await fetch(`${base}/api/tabs/${tabId}/close`, { method: "POST" }).then((r) => r.json());
+    const v = await fetch(`${base}/api/tabs/${tabId}/close`, { method: "POST", headers: H(), body: "{}" }).then((r) => r.json());
     expect(v.captures).toHaveLength(1);
     expect(v.captures[0]).toMatchObject({ amountCents: 10, final: true, status: "completed" });
     expect(v.paypal.voided).toBe(false);
@@ -194,7 +197,7 @@ describe("end to end over MCP + x402 + simulated PayPal", () => {
     const tabId = await openTab({ captureThresholdUsd: "1.00" });
     const gazette = await connect("harbor-gazette");
     await gazette.callTool("read_article", { id: "pa-0419" });
-    const v = await fetch(`${base}/api/tabs/${tabId}/revoke`, { method: "POST" }).then((r) => r.json());
+    const v = await fetch(`${base}/api/tabs/${tabId}/revoke`, { method: "POST", headers: H(), body: "{}" }).then((r) => r.json());
     expect(v.status).toBe("closed");
     expect(v.closeReason).toBe("revoked");
     expect(v.totals.captured).toBe("0.05");

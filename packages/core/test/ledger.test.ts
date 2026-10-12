@@ -79,7 +79,7 @@ describe("mandate validation", () => {
       T0,
     );
     expect(problems.join("|")).toMatch(/budget/);
-    expect(problems.join("|")).toMatch(/71 hours/);
+    expect(problems.join("|")).toMatch(/60 hours/);
     expect(problems.join("|")).toMatch(/seller/);
   });
 });

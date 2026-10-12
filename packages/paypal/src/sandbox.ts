@@ -1,4 +1,4 @@
-import { centsToValue } from "@agent-tab/core";
+import { centsToValue, valueToCents } from "@agent-tab/core";
 import {
   PayPalError,
   type AuthorizedOrder,
@@ -6,9 +6,12 @@ import {
   type CaptureResult,
   type CreateAuthorizeOrderInput,
   type CreatedOrder,
+  type OrderCapture,
   type PayoutInput,
   type PayoutResult,
   type PayPalRail,
+  type RefundInput,
+  type RefundResult,
 } from "./rail.ts";
 
 export const SANDBOX_API_BASE = "https://api-m.sandbox.paypal.com";
@@ -160,6 +163,23 @@ export class SandboxRail implements PayPalRail {
 
   async voidAuthorization(authorizationId: string, requestId: string): Promise<void> {
     await this.api("POST", `/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/void`, requestId);
+  }
+
+  async getOrderCaptures(orderId: string): Promise<OrderCapture[]> {
+    const order = await this.api<{
+      purchase_units?: { payments?: { captures?: { id: string; status: string; amount: { value: string }; invoice_id?: string }[] } }[];
+    }>("GET", `/v2/checkout/orders/${encodeURIComponent(orderId)}`);
+    const captures = order?.purchase_units?.flatMap((u) => u.payments?.captures ?? []) ?? [];
+    return captures.map((c) => ({ captureId: c.id, status: c.status, amountCents: valueToCents(c.amount.value), ...(c.invoice_id ? { invoiceId: c.invoice_id } : {}) }));
+  }
+
+  async refundCapture(input: RefundInput): Promise<RefundResult> {
+    const res = await this.api<{ id: string; status: string }>("POST", `/v2/payments/captures/${encodeURIComponent(input.captureId)}/refund`, input.requestId, {
+      amount: { currency_code: "USD", value: centsToValue(input.amountCents) },
+      ...(input.noteToPayer ? { note_to_payer: input.noteToPayer.slice(0, 255) } : {}),
+    });
+    if (!res) throw new PayPalError("empty refund response", 500);
+    return { refundId: res.id, status: res.status };
   }
 
   async createPayouts(input: PayoutInput): Promise<PayoutResult> {

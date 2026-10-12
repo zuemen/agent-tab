@@ -11,6 +11,7 @@ export type AgentEvent =
   | { type: "tool_call"; seller: string; tool: string; input: unknown; price: string }
   | { type: "payment"; seller: string; tool: string; amount: string; transaction: string }
   | { type: "payment_refused"; seller: string; tool: string; reason: string }
+  | { type: "tool_error"; seller: string; tool: string; message: string }
   | { type: "tool_result"; seller: string; tool: string; ok: boolean }
   | { type: "done"; answer: string; mode: "claude" | "scripted" };
 
@@ -79,16 +80,16 @@ function textOf(content: unknown): string {
   return content.map((c: { type?: string; text?: string }) => (c.type === "text" ? c.text : JSON.stringify(c))).join("\n");
 }
 
-/** Pull the refusal reason out of an x402 PaymentRequired tool error. */
-export function refusalReason(content: unknown): string {
+/** If a tool error is an x402 PaymentRequired (payment refused), return its reason. */
+export function refusalReason(content: unknown): string | undefined {
   const text = textOf(content);
   try {
-    const parsed = JSON.parse(text) as { error?: string };
-    if (parsed.error) return parsed.error;
+    const parsed = JSON.parse(text) as { x402Version?: number; accepts?: unknown; error?: string };
+    if (parsed.x402Version && Array.isArray(parsed.accepts)) return parsed.error ?? "payment required";
   } catch {
-    /* not JSON */
+    /* not JSON: an ordinary tool error */
   }
-  return text.slice(0, 300);
+  return undefined;
 }
 
 export interface RunOptions {
@@ -111,8 +112,13 @@ async function callSellerTool(conn: SellerConnection, tool: string, input: Recor
     }
     if (res.isError) {
       const reason = refusalReason(res.content);
-      onEvent({ type: "payment_refused", seller: conn.sellerName, tool, reason });
-      return { ok: false, text: `Refused: ${reason}` };
+      if (reason !== undefined) {
+        onEvent({ type: "payment_refused", seller: conn.sellerName, tool, reason });
+        return { ok: false, text: `Payment refused by the tab: ${reason}` };
+      }
+      const message = textOf(res.content).slice(0, 300);
+      onEvent({ type: "tool_error", seller: conn.sellerName, tool, message });
+      return { ok: false, text: `Tool error (not charged): ${message}` };
     }
     onEvent({ type: "tool_result", seller: conn.sellerName, tool, ok: true });
     return { ok: true, text: textOf(res.content) };
@@ -143,10 +149,10 @@ export async function runClaudeAgent(opts: RunOptions): Promise<string> {
   tools.push(TAB_STATUS_TOOL);
 
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: opts.task }];
-  for (let turn = 0; turn < (opts.maxTurns ?? 20); turn++) {
+  for (let turn = 0; turn < (opts.maxTurns ?? 12); turn++) {
     const response = await anthropic.messages.create({
       model: opts.model ?? DEFAULT_MODEL,
-      max_tokens: 16000,
+      max_tokens: 8000,
       system: SYSTEM_PROMPT,
       tools,
       thinking: { type: "adaptive" },

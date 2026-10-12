@@ -37,6 +37,26 @@ export interface CaptureRecord {
   status: "pending" | "completed" | "failed";
   createdAt: number;
   paypalCaptureId?: string;
+  /** PayPal's capture status. Only COMPLETED counts as money received. */
+  paypalStatus?: string;
+  error?: string;
+}
+
+/** A refund of one paid call, proposed (e.g. by the assistant) and executed after the owner confirms. */
+export interface RefundRecord {
+  id: string;
+  entrySeq: number;
+  seller: string;
+  amountCents: number;
+  /** The PayPal capture the money is returned from. */
+  paypalCaptureId: string;
+  requestId: string;
+  reason: string;
+  status: "proposed" | "pending" | "completed" | "failed";
+  createdAt: number;
+  paypalRefundId?: string;
+  /** Refunded after sellers were paid out: the platform absorbed it. */
+  afterPayout?: boolean;
   error?: string;
 }
 
@@ -66,8 +86,11 @@ export interface TabState {
   entries: LedgerEntry[];
   captures: CaptureRecord[];
   voided: boolean;
+  /** Whether the unused part of the authorization was released. */
+  voidStatus?: "not_needed" | "voided" | "failed";
   closeReason?: CloseReason;
   payout?: PayoutRecord;
+  refunds?: RefundRecord[];
 }
 
 export type RejectCode =
@@ -317,29 +340,71 @@ export function markClosed(tab: TabState, voided: boolean): void {
   tab.voided = voided;
 }
 
+/** Cents refunded (completed) per seller and in total. */
+function refundTotals(tab: TabState): { total: number; bySeller: Map<string, number> } {
+  const bySeller = new Map<string, number>();
+  let total = 0;
+  for (const r of tab.refunds ?? []) {
+    if (r.status !== "completed" || r.afterPayout) continue;
+    bySeller.set(r.seller, (bySeller.get(r.seller) ?? 0) + r.amountCents);
+    total += r.amountCents;
+  }
+  return { total, bySeller };
+}
+
 /**
  * Split captured revenue between sellers. Each seller gets its settled amount
- * minus the platform fee, rounded down to cents; the platform keeps the fee and
- * the rounding dust. The sum never exceeds what was captured.
+ * minus refunds of its calls and the platform fee, rounded down to cents; the
+ * platform keeps the fee and the rounding dust. The sum never exceeds what was
+ * captured and not refunded. Only captures PayPal reported COMPLETED count.
  */
 export function computePayouts(tab: TabState, platformFeeBps: number): PayoutRecord {
   if (!Number.isInteger(platformFeeBps) || platformFeeBps < 0 || platformFeeBps > 10_000) throw new Error("fee must be 0..10000 bps");
-  const capturedCents = tab.captures.filter((c) => c.status === "completed").reduce((s, c) => s + c.amountCents, 0);
+  const refunds = refundTotals(tab);
+  const receivedCents =
+    tab.captures.filter((c) => c.status === "completed" && (c.paypalStatus ?? "COMPLETED") === "COMPLETED").reduce((s, c) => s + c.amountCents, 0) -
+    refunds.total;
   const bySeller = new Map<string, number>();
   for (const e of tab.entries) bySeller.set(e.seller, (bySeller.get(e.seller) ?? 0) + e.amountMicros);
   const lines: PayoutLine[] = [];
-  for (const [seller, micros] of [...bySeller.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [seller, settledMicros] of [...bySeller.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const micros = Math.max(0, settledMicros - (refunds.bySeller.get(seller) ?? 0) * MICROS_PER_CENT);
     const net = Math.floor((micros * (10_000 - platformFeeBps)) / 10_000 / MICROS_PER_CENT);
     if (net > 0) lines.push({ seller, amountCents: net });
   }
   let paid = lines.reduce((s, l) => s + l.amountCents, 0);
   // Captures can fall short of settled value (budget headroom, failed capture); never pay out more than came in.
-  while (paid > capturedCents && lines.length) {
+  while (paid > Math.max(0, receivedCents) && lines.length) {
     const biggest = lines.reduce((a, b) => (b.amountCents > a.amountCents ? b : a));
-    const cut = Math.min(biggest.amountCents, paid - capturedCents);
+    const cut = Math.min(biggest.amountCents, paid - Math.max(0, receivedCents));
     biggest.amountCents -= cut;
     paid -= cut;
     if (biggest.amountCents === 0) lines.splice(lines.indexOf(biggest), 1);
   }
-  return { status: "pending", lines, platformFeeCents: capturedCents - paid };
+  return { status: "pending", lines, platformFeeCents: Math.max(0, receivedCents) - paid };
+}
+
+/**
+ * Work out a refund for one paid call: its amount (rounded half-up to cents,
+ * at least 1 cent) from a completed capture that still has that much left.
+ */
+export function planRefund(tab: TabState, entrySeq: number): Result<{ seller: string; amountCents: number; paypalCaptureId: string }> {
+  const entry = tab.entries.find((e) => e.seq === entrySeq);
+  if (!entry) return reject("UNKNOWN_RESERVATION", `no paid call #${entrySeq} on this tab`);
+  if ((tab.refunds ?? []).some((r) => r.entrySeq === entrySeq && r.status !== "failed")) {
+    return reject("REPLAYED_NONCE", `call #${entrySeq} was already refunded or has a refund pending`);
+  }
+  const amountCents = Math.max(1, Math.floor((entry.amountMicros + MICROS_PER_CENT / 2) / MICROS_PER_CENT));
+  const refundedFrom = new Map<string, number>();
+  for (const r of tab.refunds ?? []) {
+    if (r.status !== "failed") refundedFrom.set(r.paypalCaptureId, (refundedFrom.get(r.paypalCaptureId) ?? 0) + r.amountCents);
+  }
+  const usable = tab.captures
+    .filter((c) => c.status === "completed" && c.paypalCaptureId && (c.paypalStatus ?? "COMPLETED") === "COMPLETED")
+    .map((c) => ({ c, left: c.amountCents - (refundedFrom.get(c.paypalCaptureId!) ?? 0) }))
+    .filter((x) => x.left >= amountCents);
+  // Prefer the capture that took in this call (the first one after it settled).
+  const pick = usable.find((x) => x.c.createdAt >= entry.settledAt) ?? usable[0];
+  if (!pick) return reject("OVER_BUDGET", `call #${entrySeq} has not been captured yet, so there is nothing to refund`);
+  return { ok: true, value: { seller: entry.seller, amountCents, paypalCaptureId: pick.c.paypalCaptureId! } };
 }

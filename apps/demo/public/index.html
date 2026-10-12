@@ -90,6 +90,7 @@ h3 { font-size: 18px; }
 .cta.green { background: var(--green); color: #fff; }
 .ghost { background: transparent; border: 1px solid var(--rule); border-radius: 10px; padding: 11px 16px; cursor: pointer; font-weight: 700; }
 .ghost:hover { border-color: var(--ink-3); }
+.linkbtn { background: none; border: 0; padding: 0 0 0 6px; color: var(--green); font: 700 12.5px var(--sans); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .ghost.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--rule)); }
 .fine { font-size: 13px; color: var(--ink-3); margin-top: 12px; }
 
@@ -206,8 +207,17 @@ const money = (v) => {
   const dec = (String(v ?? "").split(".")[1] || "").replace(/0+$/, "").length;
   return "$" + (Number(v) || 0).toFixed(Math.max(2, Math.min(6, dec)));
 };
+// The owner key arrives once in the link fragment (#owner=...) and is kept on this device only.
+function ownerKey(tabId) { try { return localStorage.getItem("agenttab-owner:" + tabId) || ""; } catch { return ""; } }
+function takeOwnerKeyFromHash(tabId) {
+  const m = location.hash.match(/owner=([A-Za-z0-9_-]+)/);
+  if (!m) return;
+  try { localStorage.setItem("agenttab-owner:" + tabId, m[1]); } catch {}
+  history.replaceState(null, "", location.pathname + location.search);
+}
+let OWNER = "";
 const api = async (path, opts = {}) => {
-  const res = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+  const res = await fetch(path, { ...opts, headers: { "content-type": "application/json", ...(OWNER ? { "x-agenttab-owner": OWNER } : {}) } });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || res.statusText);
   return body;
@@ -274,7 +284,7 @@ function renderLanding() {
       <li><b>Budget</b><span class="muted">Equals the PayPal authorization. Captures can never exceed it.</span></li>
       <li><b>Per-call cap</b><span class="muted">One expensive call cannot drain the tab.</span></li>
       <li><b>Allowed sellers</b><span class="muted">Anyone else is refused, however the agent asks.</span></li>
-      <li><b>Expiry</b><span class="muted">At most 71 hours, inside the window where PayPal honors the held funds.</span></li>
+      <li><b>Expiry</b><span class="muted">At most 60 hours, inside the 3-day window where PayPal honors the held funds.</span></li>
       <li><b>Agent signature</b><span class="muted">Each charge is signed by the agent's key; sellers cannot forge or replay one.</span></li>
       <li><b>Revoke</b><span class="muted">One click stops new charges, captures what was used, releases the rest.</span></li>
     </ul></section>
@@ -282,7 +292,7 @@ function renderLanding() {
   </div>`;
   document.getElementById("start").onclick = async (e) => {
     e.target.disabled = true;
-    try { const r = await api("/api/demo/start", { method: "POST" }); location.href = "/tab/" + r.tabId; }
+    try { const r = await api("/api/demo/start", { method: "POST", body: "{}" }); location.href = new URL(r.reviewUrl).pathname + new URL(r.reviewUrl).hash; }
     catch (err) { e.target.disabled = false; alertBox(err.message); }
   };
 }
@@ -296,15 +306,35 @@ function alertBox(msg, kind = "err") {
 }
 
 /* ---------------- tab page ---------------- */
-let TAB = null, FEED = [], seenSeq = new Set(), ES = null, RUNNING = false, ANSWER = null, ASK = null;
+let TAB = null, FEED = [], seenSeq = new Set(), ES = null, RUNNING = false, ANSWER = null, ASK = null, ASKING = false, DRAFT = "", RUNNOTE = null;
 
 async function renderTab(tabId) {
+  takeOwnerKeyFromHash(tabId);
+  OWNER = ownerKey(tabId);
   TAB = await api("/api/tabs/" + encodeURIComponent(tabId));
+  if (!TAB.owner) return renderPublic();
+  try {
+    const run = await api("/api/demo/runs/" + encodeURIComponent(tabId));
+    FEED = run.log.filter((d) => d.type !== "tool_result" && d.type !== "thinking");
+    RUNNING = run.running;
+    RUNNOTE = run.note || null;
+    const done = run.log.find((d) => d.type === "done");
+    if (done) ANSWER = done.answer;
+  } catch {}
   document.title = "Tab " + short(tabId) + " · AgentTab";
   const q = new URLSearchParams(location.search);
   if (TAB.status === "requested") return renderReview(q);
   renderDashboard(q);
   if (!ES) connectEvents(tabId);
+}
+
+function renderPublic() {
+  $app.innerHTML = `<div class="page"><div class="slip torn review">
+    <div class="eyebrow">Tab ${esc(short(TAB.tabId))}</div>
+    <h2 style="margin-top:10px">This tab is ${esc(String(TAB.status).replace(/_/g, " "))}</h2>
+    ${TAB.remaining ? `<p class="muted">Remaining budget ${money(TAB.remaining)} · per-call cap ${money(TAB.perCallCap)}</p>` : ""}
+    <p class="muted">Only the person who opened it can see the details and manage it, from the link they received. Open that link on this device.</p>
+    <a class="cta" href="/">AgentTab home</a></div></div>`;
 }
 
 function renderReview(q) {
@@ -323,7 +353,7 @@ function renderReview(q) {
       <div class="field"><label for="budget">Budget</label><div class="money"><span>$</span><input id="budget" inputmode="decimal" value="${esc(s.budgetUsd)}" required></div><div class="hint">PayPal holds this amount. You pay only what is used.</div></div>
       <div class="field"><label for="cap">Per-call cap</label><div class="money"><span>$</span><input id="cap" inputmode="decimal" value="${esc(s.perCallCapUsd)}" required></div><div class="hint">The most a single tool call may cost.</div></div>
       <div class="field"><label for="thr">Capture every</label><div class="money"><span>$</span><input id="thr" inputmode="decimal" value="${esc(s.captureThresholdUsd)}" required></div><div class="hint">Usage is captured in batches of this size to keep fees low.</div></div>
-      <div class="field"><label for="hrs">Expires after</label><select id="hrs" class="plain">${[1, 6, 24, 48, 71].map((h) => `<option value="${h}" ${h === Number(s.expiresInHours) ? "selected" : ""}>${h} hours</option>`).join("")}</select><div class="hint">Unused budget is released at expiry.</div></div>
+      <div class="field"><label for="hrs">Expires after</label><select id="hrs" class="plain">${[1, 6, 24, 48, 60].map((h) => `<option value="${h}" ${h === Number(s.expiresInHours) ? "selected" : ""}>${h} hours</option>`).join("")}</select><div class="hint">Unused budget is released at expiry.</div></div>
       <fieldset class="checks"><legend class="eyebrow" style="padding:0 6px">Sellers the agent may pay</legend>${sellerRows}</fieldset>
     </form>
     <div class="submit-row">
@@ -334,7 +364,7 @@ function renderReview(q) {
   </div></div>`;
   const btn = document.getElementById("authorize");
   document.getElementById("budget").oninput = (e) => { btn.textContent = "Authorize $" + (Number(e.target.value) || 0).toFixed(2) + " with PayPal"; };
-  document.getElementById("decline").onclick = async () => { await api(`/api/tabs/${TAB.tabId}/close`, { method: "POST" }); location.href = "/"; };
+  document.getElementById("decline").onclick = async () => { await api(`/api/tabs/${TAB.tabId}/close`, { method: "POST", body: "{}" }); location.href = "/"; };
   btn.onclick = async () => {
     const terms = {
       budgetUsd: document.getElementById("budget").value.trim(),
@@ -368,10 +398,18 @@ function renderDashboard(q) {
   if (q.get("approved") && active && !t.calls) notes.push(`<div class="note">Authorized with PayPal. The hold is in place; nothing has been charged yet.</div>`);
   if (q.get("error")) notes.push(`<div class="note err">${esc(q.get("error"))}</div>`);
   if (TAB.closeReason === "capture_failed") notes.push(`<div class="note err">PayPal refused a capture, so the tab was frozen: no new charges are accepted.</div>`);
+  if (TAB.notice) notes.push(`<div class="note err">${esc(TAB.notice)}</div>`);
+  if (RUNNOTE) notes.push(`<div class="note warn">${esc(RUNNOTE)}</div>`);
+  if (TAB.status === "closing" && TAB.closeReason !== "capture_failed") notes.push(`<div class="note warn">Closing: waiting on PayPal for the last steps. This page updates by itself.</div>`);
   if (TAB.status === "awaiting_approval") notes.push(`<div class="note warn">Waiting for PayPal approval. If you closed the PayPal window, start again from the review page.</div>`);
 
   const rows = [];
-  for (const e of TAB.entries || []) rows.push({ at: e.settledAt, html: `<tr class="${seenSeq.has(e.seq) ? "" : "new"}"><td><span class="num">#${e.seq}</span> <span class="muted" style="font-size:12px">${time(e.settledAt)}</span></td><td>${esc(sellerName(e.seller))} · ${esc(e.resource.split("/").pop())}<div class="num muted" style="font-size:11.5px;word-break:break-all">${esc(TAB.tabId)}:${e.seq}</div></td><td class="amt">${money(e.amount)}</td></tr>` });
+  const refunded = new Set((TAB.refunds || []).filter((r) => r.status !== "failed").map((r) => r.entrySeq));
+  const anyCaptured = (TAB.captures || []).some((c) => c.status === "completed");
+  for (const e of TAB.entries || []) {
+    const refundBtn = anyCaptured && !refunded.has(e.seq) ? ` <button class="linkbtn" data-refund="${e.seq}">Refund</button>` : refunded.has(e.seq) ? ` <span class="muted" style="font-size:12px">refund ${esc((TAB.refunds.find((r) => r.entrySeq === e.seq) || {}).status || "")}</span>` : "";
+    rows.push({ at: e.settledAt, html: `<tr class="${seenSeq.has(e.seq) ? "" : "new"}"><td><span class="num">#${e.seq}</span> <span class="muted" style="font-size:12px">${time(e.settledAt)}</span></td><td>${esc(sellerName(e.seller))} · ${esc(e.resource.split("/").pop())}${refundBtn}<div class="num muted" style="font-size:11.5px;word-break:break-all">${esc(TAB.tabId)}:${e.seq}</div></td><td class="amt">${money(e.amount)}</td></tr>` });
+  }
   for (const c of TAB.captures || []) rows.push({ at: c.createdAt + 1, html: `<tr class="capture-row ${c.status}"><td colspan="2"><b>${c.status === "completed" ? "Captured from PayPal hold" : c.status === "failed" ? "Capture failed" : "Capturing…"}</b>${c.final ? " (final)" : ""} <span class="num muted" style="font-size:12px">${esc(c.paypalCaptureId || c.requestId)}</span>${c.error ? `<div style="color:var(--red)">${esc(c.error)}</div>` : ""}</td><td class="amt">${money(c.amount)}</td></tr>` });
   rows.sort((a, b) => a.at - b.at);
   (TAB.entries || []).forEach((e) => seenSeq.add(e.seq));
@@ -393,6 +431,7 @@ function renderDashboard(q) {
         <dt>Capture every</dt><dd>${money(m.captureThreshold)}</dd>
         <dt>Expires</dt><dd>${esc(new Date(m.expiresAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }))}</dd>
         <dt>Paid calls</dt><dd>${t.calls}</dd>
+        ${(TAB.refunds || []).some((r) => r.status === "completed") ? `<dt>Refunded</dt><dd>${money((TAB.refunds.filter((r) => r.status === "completed").reduce((a, r) => a + r.amountCents, 0) / 100).toFixed(2))}</dd>` : ""}
         <dt>Allowed sellers</dt><dd style="font-family:var(--sans)">${m.allowedSellers.map((s) => esc(sellerName(s))).join("<br>")}</dd>
       </dl>` : ""}
       <div class="refs"><b>PayPal order</b> ${esc(p.orderId || "—")}<br><b>Authorization</b> ${esc(p.authorizationId || "—")}${p.voided ? "<br><b>Remainder</b> released (voided)" : ""}${TAB.closeReason ? `<br><b>Closed</b> ${esc(TAB.closeReason.replace(/_/g, " "))}` : ""}</div>
@@ -407,11 +446,14 @@ function renderDashboard(q) {
         ${rows.length ? `<table class="ledger"><thead><tr><th>Call</th><th>Seller · item · ledger ref</th><th class="amt">Amount</th></tr></thead><tbody>${rows.map((r) => r.html).join("")}</tbody></table>` : `<div class="empty">No charges yet. ${active ? "Run the agent to start buying." : ""}</div>`}
       </section>
       ${payoutHtml}
+      ${(TAB.refunds || []).length ? `<section class="slip panel"><div class="panel-head"><h3>Refunds</h3><span class="count">nothing moves until you confirm</span></div>
+        <table class="ledger"><tbody>${TAB.refunds.map((r) => `<tr><td>Call #${r.entrySeq} · ${esc(sellerName(r.seller))}<div class="muted" style="font-size:12.5px">${esc(r.reason)}${r.paypalRefundId ? ` · <span class="num">${esc(r.paypalRefundId)}</span>` : ""}${r.afterPayout ? " · after payout (platform absorbs)" : ""}${r.error ? ` · <span style="color:var(--red)">${esc(r.error)}</span>` : ""}</div></td>
+          <td class="amt">${money(r.amount)}<div>${r.status === "proposed" || r.status === "pending" ? `<button class="ghost" style="padding:6px 10px;margin-top:6px" data-confirm="${esc(r.id)}">${r.status === "pending" ? "Retry" : "Confirm refund"}</button>` : `<span class="muted" style="font-size:12px">${esc(r.status)}</span>`}</div></td></tr>`).join("")}</tbody></table></section>` : ""}
       <section class="slip panel"><div class="panel-head"><h3>Ask about this tab</h3><span class="count">${INFO.agentMode === "claude" ? (INFO.rail === "sandbox" ? "Claude + PayPal Agent Toolkit" : "Claude · ledger only") : "needs a Claude API key"}</span></div>
-        ${INFO.agentMode === "claude" ? `<form id="ask" style="display:flex;gap:10px;padding:14px 18px"><input id="q" class="plain" maxlength="500" placeholder="e.g. What did the panel question cost? Refund it." style="flex:1"><button class="ghost" id="askbtn">Ask</button></form>
+        ${INFO.agentMode === "claude" ? `<form id="ask" style="display:flex;gap:10px;padding:14px 18px"><input id="q" class="plain" maxlength="500" placeholder="e.g. What did the panel question cost? Refund it." style="flex:1" value="${esc(DRAFT)}"><button class="ghost" id="askbtn" ${ASKING ? "disabled" : ""}>${ASKING ? "Thinking…" : "Ask"}</button></form>
         ${ASK ? `<p class="answer" style="border-top:1px solid var(--rule)"><b>Q:</b> ${esc(ASK.q)}
 
-${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and issues refunds through PayPal. It needs ANTHROPIC_API_KEY on the server.</div>`}
+${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and proposes refunds for you to confirm. It needs ANTHROPIC_API_KEY on the server.</div>`}
       </section>
       <section class="slip panel"><div class="panel-head"><h3>Agent activity</h3><span class="count">${INFO.agentMode === "claude" ? "Claude" : "scripted"}</span></div>
         ${FEED.length ? `<ul class="feed" id="feed">${FEED.map(feedItem).join("")}</ul>` : `<div class="empty">The agent's purchases and refusals appear here as they happen.</div>`}
@@ -424,19 +466,31 @@ ${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charg
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
   on("run", async (e) => {
     e.target.disabled = true;
-    try { const r = await api("/api/demo/run", { method: "POST", body: JSON.stringify({ tabId: TAB.tabId }) }); RUNNING = true; FEED.push({ type: "start", mode: r.mode }); refresh(); }
+    try { const r = await api("/api/demo/run", { method: "POST", body: JSON.stringify({ tabId: TAB.tabId }) }); RUNNING = true; RUNNOTE = r.note || null; FEED = [{ type: "start", mode: r.mode }]; ANSWER = null; refresh(); }
     catch (err) { e.target.disabled = false; alertBox(err.message); }
   });
+  const qInput = document.getElementById("q");
+  if (qInput) qInput.oninput = (e) => { DRAFT = e.target.value; };
   const ask = document.getElementById("ask");
   if (ask) ask.onsubmit = async (e) => {
     e.preventDefault();
-    const q = document.getElementById("q").value.trim();
-    if (!q) return;
-    const btn = document.getElementById("askbtn");
-    btn.disabled = true; btn.textContent = "Thinking…";
-    try { const r = await api(`/api/tabs/${TAB.tabId}/ask`, { method: "POST", body: JSON.stringify({ question: q }) }); ASK = { q, a: r.answer }; refresh(); }
-    catch (err) { ASK = { q, a: "Error: " + err.message }; refresh(); }
+    const q = DRAFT.trim();
+    if (!q || ASKING) return;
+    ASKING = true; refresh();
+    try { const r = await api(`/api/tabs/${TAB.tabId}/ask`, { method: "POST", body: JSON.stringify({ question: q }) }); ASK = { q, a: r.answer }; DRAFT = ""; }
+    catch (err) { ASK = { q, a: "Error: " + err.message }; }
+    ASKING = false; refresh();
   };
+  document.querySelectorAll("[data-refund]").forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try { await api(`/api/tabs/${TAB.tabId}/refunds`, { method: "POST", body: JSON.stringify({ entrySeq: Number(b.dataset.refund), reason: "requested by the tab owner" }) }); refresh(); }
+    catch (err) { b.disabled = false; alertBox(err.message); }
+  }));
+  document.querySelectorAll("[data-confirm]").forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try { await api(`/api/tabs/${TAB.tabId}/refunds/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST", body: "{}" }); refresh(); }
+    catch (err) { b.disabled = false; alertBox(err.message); }
+  }));
   on("close", () => act("close"));
   on("revoke", () => act("revoke"));
 }
@@ -444,7 +498,7 @@ ${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charg
 async function act(kind) {
   const label = kind === "revoke" ? "Revoke the tab? New charges stop now; used amounts are captured and the rest is released." : "Close the tab? Usage is captured, the rest is released and sellers are paid out.";
   if (!confirm(label)) return;
-  try { TAB = await api(`/api/tabs/${TAB.tabId}/${kind}`, { method: "POST" }); renderDashboard(new URLSearchParams()); }
+  try { TAB = await api(`/api/tabs/${TAB.tabId}/${kind}`, { method: "POST", body: "{}" }); TAB.owner = true; renderDashboard(new URLSearchParams()); }
   catch (err) { alertBox(err.message); }
 }
 
@@ -472,6 +526,7 @@ function feedItem(ev) {
     case "tool_call": return row("", "→", `${esc(ev.seller)} · ${esc(ev.tool)}`, ev.price === "free" ? "free" : esc(ev.price));
     case "payment": return row("pay", "✓", `Paid ${esc(ev.seller)} for ${esc(ev.tool)}`, esc(ev.amount));
     case "payment_refused": return row("refused", "✕", `<span title="${esc(ev.reason)}">Refused: ${esc(ev.seller)} · ${esc(ev.tool)} — ${esc(plainReason(ev.reason))}</span>`);
+    case "tool_error": return row("", "!", `Tool error (not charged): ${esc(ev.seller)} · ${esc(ev.tool)}`);
     case "text": return row("", "“", esc(ev.text.length > 220 ? ev.text.slice(0, 220) + "…" : ev.text));
     case "done": return row("", "■", "Agent finished");
     default: return "";
@@ -482,14 +537,17 @@ let refreshTimer = null;
 function refresh() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(async () => {
-    try { TAB = await api("/api/tabs/" + TAB.tabId); if (TAB.status !== "requested") renderDashboard(new URLSearchParams(location.search)); } catch {}
+    try { TAB = await api("/api/tabs/" + TAB.tabId); if (TAB.owner && TAB.status !== "requested") renderDashboard(new URLSearchParams(location.search)); } catch {}
   }, 120);
 }
 
-function connectEvents(tabId) {
-  ES = new EventSource(`/api/tabs/${encodeURIComponent(tabId)}/events`);
+async function connectEvents(tabId) {
+  let ticket;
+  try { ticket = (await api(`/api/tabs/${encodeURIComponent(tabId)}/events-ticket`, { method: "POST", body: "{}" })).ticket; } catch { return; }
+  ES = new EventSource(`/api/tabs/${encodeURIComponent(tabId)}/events?ticket=${encodeURIComponent(ticket)}`);
+  ES.onerror = () => { ES.close(); ES = null; setTimeout(() => { if (!ES) connectEvents(tabId); }, 3000); };
   const on = (type, fn) => ES.addEventListener(type, (m) => fn(JSON.parse(m.data)));
-  for (const type of ["tab_active", "charge", "capture_started", "capture_completed", "capture_failed", "capture_retry_pending", "tab_closing", "tab_closed", "authorization_voided", "payout_sent", "payout_failed"]) on(type, refresh);
+  for (const type of ["tab_active", "charge", "capture_started", "capture_completed", "capture_failed", "capture_retry_pending", "tab_closing", "tab_closed", "authorization_voided", "payout_sent", "payout_failed", "payout_retry_pending", "void_failed", "capture_reconciled", "refund_proposed", "refund_completed", "refund_failed", "assistant"]) on(type, refresh);
   on("agent", (ev) => {
     const d = ev.detail;
     if (d.type === "tool_result" || d.type === "thinking") return;

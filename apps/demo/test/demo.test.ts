@@ -9,6 +9,8 @@ let server: ServerType;
 let base = "";
 let rail: SimulatedRail;
 let demo: ReturnType<typeof buildDemo>;
+const owners = new Map<string, string>();
+const H = (tabId: string) => ({ "content-type": "application/json", "x-agenttab-owner": owners.get(tabId) ?? "" });
 
 beforeAll(async () => {
   rail = new SimulatedRail("http://pending/simulated/approve");
@@ -34,11 +36,14 @@ afterAll(async () => {
 });
 
 async function approveDemoTab(): Promise<string> {
-  const start = await fetch(`${base}/api/demo/start`, { method: "POST" }).then((r) => r.json() as Promise<{ tabId: string }>);
-  const view = await fetch(`${base}/api/tabs/${start.tabId}`).then((r) => r.json());
+  const start = await fetch(`${base}/api/demo/start`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).then(
+    (r) => r.json() as Promise<{ tabId: string; reviewUrl: string }>,
+  );
+  owners.set(start.tabId, new URL(start.reviewUrl).hash.replace("#owner=", ""));
+  const view = await fetch(`${base}/api/tabs/${start.tabId}`, { headers: H(start.tabId) }).then((r) => r.json());
   const { approveUrl } = await fetch(`${base}/api/tabs/${start.tabId}/terms`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: H(start.tabId),
     body: JSON.stringify(view.suggested),
   }).then((r) => r.json() as Promise<{ approveUrl: string }>);
   const returnUrl = rail.approve(new URL(approveUrl).searchParams.get("token")!);
@@ -63,7 +68,7 @@ describe("all-in-one demo", () => {
     demo.service.events.on("event", (ev) => {
       if (ev.tabId === tabId) events.push(ev);
     });
-    const run = await fetch(`${base}/api/demo/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tabId }) });
+    const run = await fetch(`${base}/api/demo/run`, { method: "POST", headers: H(tabId), body: JSON.stringify({ tabId }) });
     expect(run.status).toBe(202);
     expect((await run.json()).mode).toBe("scripted");
     await waitFor(async () => (events.some((e) => e.detail?.type === "done") ? true : undefined));
@@ -71,12 +76,12 @@ describe("all-in-one demo", () => {
     const refused = events.filter((e) => e.detail?.type === "payment_refused");
     expect(refused).toHaveLength(1);
     expect(refused[0]!.detail!.reason).toMatch(/seller_not_allowed/);
-    const v = await fetch(`${base}/api/tabs/${tabId}`).then((r) => r.json());
+    const v = await fetch(`${base}/api/tabs/${tabId}`, { headers: H(tabId) }).then((r) => r.json());
     // 2 articles (0.10) + price history (0.02) + competitor menu (0.25) + panel (0.40)
     expect(v.totals.spent).toBe("0.77");
     expect(v.totals.calls).toBe(5);
 
-    const closed = await fetch(`${base}/api/tabs/${tabId}/close`, { method: "POST" }).then((r) => r.json());
+    const closed = await fetch(`${base}/api/tabs/${tabId}/close`, { method: "POST", headers: H(tabId), body: "{}" }).then((r) => r.json());
     expect(closed.status).toBe("closed");
     expect(closed.totals.captured).toBe("0.77");
     expect(closed.payout.lines.length).toBe(3);
@@ -105,7 +110,8 @@ describe("all-in-one demo", () => {
     // Re-key the tab's agent: start a fresh request so we hold the key.
     const keys = generateAgentKeyPair();
     const req = demo.service.requestTab({ agentPublicKey: keys.publicKey, purpose: "stub run", suggested: { sellers: ["harbor-gazette"] } });
-    const view = await fetch(`${base}/api/tabs/${req.tabId}`).then((r) => r.json());
+    owners.set(req.tabId, req.ownerKey);
+    const view = await fetch(`${base}/api/tabs/${req.tabId}`, { headers: H(req.tabId) }).then((r) => r.json());
     const { approveUrl } = await demo.service.approveTerms(req.tabId, view.suggested);
     const token = new URL(approveUrl).searchParams.get("token")!;
     rail.approve(token);
@@ -127,8 +133,20 @@ describe("all-in-one demo", () => {
     expect(first.tools.map((t) => t.name)).toEqual(["harbor-gazette__read_article", "harbor-gazette__search_headlines", "tab_status"]);
     expect(first.cache_control).toEqual({ type: "ephemeral" });
     expect(events.map((e) => e.type)).toEqual(["tool_call", "payment", "tool_result", "text", "done"]);
-    const v = await fetch(`${base}/api/tabs/${req.tabId}`).then((r) => r.json());
+    const v = await fetch(`${base}/api/tabs/${req.tabId}`, { headers: H(req.tabId) }).then((r) => r.json());
     expect(v.totals.spent).toBe("0.05");
     await conn.client.close();
+  });
+
+  it("only the owner can run the agent; MCP endpoints are POST only", async () => {
+    const tabId = await approveDemoTab();
+    const noKey = await fetch(`${base}/api/demo/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tabId }) });
+    expect(noKey.status).toBe(403);
+    const runs = await fetch(`${base}/api/demo/runs/${tabId}`);
+    expect(runs.status).toBe(403);
+    const get = await fetch(`${base}/mcp/harbor-gazette`);
+    expect(get.status).toBe(405);
+    const ask = await fetch(`${base}/api/tabs/${tabId}/ask`, { method: "POST", headers: H(tabId), body: JSON.stringify({ question: "hi" }) });
+    expect(ask.status).toBe(503); // no Claude key configured in tests
   });
 });

@@ -8,13 +8,13 @@ function fakeToolkit() {
     client: {
       listTools: async () => ({
         tools: [
-          { name: "create_refund", description: "Refund a capture", inputSchema: { type: "object", properties: {} } },
           { name: "get_order", description: "Get an order", inputSchema: { type: "object", properties: {} } },
+          { name: "list_transactions", description: "List all", inputSchema: { type: "object", properties: {} } },
         ],
       }),
       callTool: async (req: { name: string; arguments: Record<string, unknown> }) => {
         calls.push(req);
-        return { content: [{ type: "text", text: JSON.stringify({ id: "REFUND-1", status: "COMPLETED" }) }] };
+        return { content: [{ type: "text", text: JSON.stringify({ id: req.arguments.id, status: "COMPLETED" }) }] };
       },
     },
   };
@@ -39,45 +39,48 @@ function scriptedModel(turns: { name: string; input: Record<string, unknown> }[]
   };
 }
 
-const facts = () => ({ tabId: "tab_x", orderId: "5O190127TN364715T", captures: new Map([["CAP1", 40]]), view: { tabId: "tab_x" } });
+const facts = { tabId: "tab_x", orderId: "5O190127TN364715T", view: { tabId: "tab_x" } };
 
-describe("tab assistant guard", () => {
-  it("exposes the tab ledger plus the PayPal Agent Toolkit tools", async () => {
+describe("tab assistant", () => {
+  it("gets the ledger, propose_refund, and only get_order from the PayPal Agent Toolkit", async () => {
     const model = scriptedModel([]);
-    await askAssistant({ question: "q", facts: facts(), toolkit: fakeToolkit().client as never, anthropic: model.client as never });
-    expect(model.seen[0]!.tools.map((t) => t.name)).toEqual(["tab_ledger", "create_refund", "get_order"]);
+    await askAssistant({ question: "q", facts, proposeRefund: () => ({}), toolkit: fakeToolkit().client as never, anthropic: model.client as never });
+    expect(model.seen[0]!.tools.map((t) => t.name)).toEqual(["tab_ledger", "propose_refund", "get_order"]);
   });
 
-  it("refunds this tab's capture within its amount, and tracks what is left", async () => {
-    const tk = fakeToolkit();
-    const f = facts();
+  it("never moves money: propose_refund only creates a proposal", async () => {
+    const proposals: [number, string][] = [];
     const events: AssistantEvent[] = [];
-    const model = scriptedModel([
-      { name: "create_refund", input: { capture_id: "CAP1", amount: { currency_code: "USD", value: "0.25" } } },
-      { name: "create_refund", input: { capture_id: "CAP1", amount: { currency_code: "USD", value: "0.20" } } }, // only 0.15 left
-      { name: "create_refund", input: { capture_id: "CAP1", amount: { currency_code: "USD", value: "0.15" } } },
-    ]);
-    await askAssistant({ question: "refund", facts: f, toolkit: tk.client as never, anthropic: model.client as never, onEvent: (e) => events.push(e) });
-    expect(tk.calls.map((c) => (c.arguments.amount as { value: string }).value)).toEqual(["0.25", "0.15"]);
-    expect(events.map((e) => e.type)).toEqual(["refund", "blocked", "refund"]);
-    expect(f.captures.get("CAP1")).toBe(0);
+    const model = scriptedModel([{ name: "propose_refund", input: { call_number: 3, reason: "useless" } }]);
+    await askAssistant({
+      question: "refund call 3",
+      facts,
+      proposeRefund: (n, r) => {
+        proposals.push([n, r]);
+        return { id: "ref_1", status: "proposed" };
+      },
+      anthropic: model.client as never,
+      onEvent: (e) => events.push(e),
+    });
+    expect(proposals).toEqual([[3, "useless"]]);
+    expect(events.map((e) => e.type)).toEqual(["refund_proposed"]);
   });
 
-  it("blocks refunds of captures that are not on this tab, and lookups of other orders", async () => {
+  it("looks up only this tab's order", async () => {
     const tk = fakeToolkit();
     const model = scriptedModel([
-      { name: "create_refund", input: { capture_id: "SOMEONE-ELSES" } },
       { name: "get_order", input: { id: "OTHER-ORDER" } },
       { name: "get_order", input: { id: "5O190127TN364715T" } },
+      { name: "list_transactions", input: {} },
     ]);
-    await askAssistant({ question: "q", facts: facts(), toolkit: tk.client as never, anthropic: model.client as never });
+    await askAssistant({ question: "q", facts, proposeRefund: () => ({}), toolkit: tk.client as never, anthropic: model.client as never });
     expect(tk.calls).toEqual([{ name: "get_order", arguments: { id: "5O190127TN364715T" } }]);
   });
 
-  it("works without PayPal tools (simulated rail): ledger only", async () => {
+  it("without PayPal tools (simulated rail) it works from the ledger only", async () => {
     const model = scriptedModel([{ name: "tab_ledger", input: {} }]);
-    const answer = await askAssistant({ question: "what did I buy?", facts: facts(), anthropic: model.client as never });
+    const answer = await askAssistant({ question: "what did I buy?", facts, proposeRefund: () => ({}), anthropic: model.client as never });
     expect(answer).toBe("done");
-    expect(model.seen[0]!.tools.map((t) => t.name)).toEqual(["tab_ledger"]);
+    expect(model.seen[0]!.tools.map((t) => t.name)).toEqual(["tab_ledger", "propose_refund"]);
   });
 });

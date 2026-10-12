@@ -1,34 +1,95 @@
-import { Hono } from "hono";
+import { randomBytes } from "node:crypto";
+import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
-import { SimulatedRail } from "@agent-tab/paypal";
+import { PayPalError, SimulatedRail } from "@agent-tab/paypal";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import type { TabEvent, TabService, TabTerms } from "./service.ts";
+import { UserError, type TabEvent, type TabService, type TabTerms } from "./service.ts";
 
 export interface AppOptions {
   /** Static web UI (HTML string) served for / and /tab/:id. */
   webHtml?: () => string;
+  /** Max tab requests per client IP per hour (default 30). */
+  tabRequestsPerHour?: number;
 }
+
+export const OWNER_HEADER = "x-agenttab-owner";
 
 function bearer(header: string | undefined): string | undefined {
   const m = /^Bearer\s+(.+)$/i.exec(header ?? "");
   return m?.[1];
 }
 
+export function clientIp(c: Context): string {
+  return (c.req.header("x-forwarded-for")?.split(",")[0] ?? "").trim() || "local";
+}
+
+/** Fixed-window limiter keyed by an arbitrary string. */
+export function rateLimiter(limit: number, windowMs: number) {
+  const hits = new Map<string, { n: number; until: number }>();
+  return (key: string): boolean => {
+    const now = Date.now();
+    if (hits.size > 10_000) for (const [k, v] of hits) if (v.until < now) hits.delete(k);
+    const h = hits.get(key);
+    if (!h || h.until < now) {
+      hits.set(key, { n: 1, until: now + windowMs });
+      return true;
+    }
+    h.n++;
+    return h.n <= limit;
+  };
+}
+
 export function createApp(service: TabService, opts: AppOptions = {}): Hono {
   const app = new Hono();
+  const tabLimiter = rateLimiter(opts.tabRequestsPerHour ?? 30, 3600_000);
+  const sseTickets = new Map<string, { tabId: string; until: number }>();
 
-  app.onError((err, c) => c.json({ error: err.message }, 400));
+  app.onError((err, c) => {
+    if (err instanceof UserError) return c.json({ error: err.message }, err.status as 400);
+    if (err instanceof PayPalError) return c.json({ error: `PayPal error: ${err.code}`, debugId: err.debugId }, 502);
+    console.error(err);
+    return c.json({ error: "internal error" }, 500);
+  });
+
+  // Small JSON bodies only; mutating API calls must be JSON (blocks simple cross-site form posts).
+  app.use("*", bodyLimit({ maxSize: 32 * 1024, onError: (c) => c.json({ error: "request body too large" }, 413) }));
+  app.use("/api/*", async (c, next) => {
+    if (c.req.method === "POST" && !(c.req.header("content-type") ?? "").includes("application/json")) {
+      return c.json({ error: "content-type must be application/json" }, 415);
+    }
+    await next();
+  });
+
+  const json = async <T>(c: Context): Promise<T> => {
+    try {
+      return (await c.req.json()) as T;
+    } catch {
+      throw new UserError("body must be valid JSON");
+    }
+  };
+  const tabOf = (c: Context): string => {
+    const id = c.req.param("id") ?? "";
+    if (!service.has(id)) throw new UserError("unknown tab", 404);
+    return id;
+  };
+  const isOwner = (c: Context, tabId: string) => service.isOwner(tabId, c.req.header(OWNER_HEADER));
+  const requireOwner = (c: Context): string => {
+    const id = tabOf(c);
+    if (!isOwner(c, id)) throw new UserError("only the tab owner can do this (owner key missing or wrong)", 403);
+    return id;
+  };
 
   // ---- x402 facilitator API (spec §7) ----
   app.get("/supported", (c) => c.json(service.supported()));
 
   app.post("/verify", async (c) => {
-    const body = (await c.req.json()) as { paymentPayload: PaymentPayload; paymentRequirements: PaymentRequirements };
+    const body = await json<{ paymentPayload: PaymentPayload; paymentRequirements: PaymentRequirements }>(c);
     return c.json(service.verify(body.paymentPayload, body.paymentRequirements));
   });
 
   app.post("/settle", async (c) => {
-    const body = (await c.req.json()) as { paymentPayload: PaymentPayload; paymentRequirements: PaymentRequirements };
+    const body = await json<{ paymentPayload: PaymentPayload; paymentRequirements: PaymentRequirements }>(c);
     const seller = service.sellerForKey(bearer(c.req.header("authorization")));
     return c.json(service.settle(body.paymentPayload, body.paymentRequirements, seller));
   });
@@ -38,33 +99,57 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
     c.json({ rail: service.rail.mode, network: service.config.network, sellers: service.publicSellers(), platformFeeBps: service.config.platformFeeBps }),
   );
 
+  /** An agent asks for a tab. The response's reviewUrl (with the owner key in its fragment) is for the human. */
   app.post("/api/tab-requests", async (c) => {
-    const body = (await c.req.json()) as { agentPublicKey: string; purpose: string; agentName?: string; suggested?: Partial<TabTerms> };
-    return c.json(service.requestTab(body), 201);
+    if (!tabLimiter(clientIp(c))) return c.json({ error: "too many tab requests; try again later" }, 429);
+    const body = await json<{ agentPublicKey: string; purpose: string; agentName?: string; suggested?: Partial<TabTerms> }>(c);
+    const { tabId, reviewUrl } = service.requestTab(body);
+    return c.json({ tabId, reviewUrl }, 201);
   });
 
   app.get("/api/tabs/:id", (c) => {
-    const id = c.req.param("id");
-    if (!service.has(id)) return c.json({ error: "unknown tab" }, 404);
-    return c.json(service.view(id));
+    const id = tabOf(c);
+    return c.json(isOwner(c, id) ? { ...service.view(id), owner: true } : { ...service.publicView(id), owner: false });
   });
 
   app.post("/api/tabs/:id/terms", async (c) => {
-    const terms = (await c.req.json()) as TabTerms;
-    return c.json(await service.approveTerms(c.req.param("id"), terms));
+    const id = requireOwner(c);
+    return c.json(await service.approveTerms(id, await json<TabTerms>(c)));
+  });
+  app.post("/api/tabs/:id/close", async (c) => c.json(await service.close(requireOwner(c), "closed_by_user")));
+  app.post("/api/tabs/:id/revoke", async (c) => c.json(await service.close(requireOwner(c), "revoked")));
+
+  app.post("/api/tabs/:id/refunds", async (c) => {
+    const id = requireOwner(c);
+    const body = await json<{ entrySeq: number; reason?: string }>(c);
+    return c.json(service.proposeRefund(id, Number(body.entrySeq), body.reason ?? "requested by the tab owner"), 201);
+  });
+  app.post("/api/tabs/:id/refunds/:rid/confirm", async (c) => {
+    const id = requireOwner(c);
+    return c.json(await service.confirmRefund(id, c.req.param("rid")));
   });
 
-  app.post("/api/tabs/:id/close", async (c) => c.json(await service.close(c.req.param("id"), "closed_by_user")));
-  app.post("/api/tabs/:id/revoke", async (c) => c.json(await service.close(c.req.param("id"), "revoked")));
+  // EventSource cannot send headers, so the owner trades the key for a one-time ticket.
+  app.post("/api/tabs/:id/events-ticket", (c) => {
+    const id = requireOwner(c);
+    const now = Date.now();
+    for (const [t, v] of sseTickets) if (v.until < now) sseTickets.delete(t);
+    const ticket = randomBytes(18).toString("base64url");
+    sseTickets.set(ticket, { tabId: id, until: now + 60_000 });
+    return c.json({ ticket });
+  });
 
   app.get("/api/tabs/:id/events", (c) => {
-    const id = c.req.param("id");
+    const id = tabOf(c);
+    const ticket = sseTickets.get(c.req.query("ticket") ?? "");
+    if (!ticket || ticket.tabId !== id || ticket.until < Date.now()) return c.json({ error: "missing or expired ticket" }, 403);
+    sseTickets.delete(c.req.query("ticket")!);
     return streamSSE(c, async (stream) => {
       const queue: TabEvent[] = [];
       let wake: (() => void) | undefined;
       const onEvent = (ev: TabEvent) => {
         if (ev.tabId !== id) return;
-        queue.push(ev);
+        if (queue.length < 500) queue.push(ev);
         wake?.();
       };
       service.events.on("event", onEvent);
@@ -75,10 +160,12 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
       await stream.writeSSE({ event: "hello", data: JSON.stringify({ tabId: id }) });
       while (!stream.aborted) {
         if (!queue.length) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
           await new Promise<void>((r) => {
             wake = r;
-            setTimeout(r, 15_000); // keep-alive tick
+            timer = setTimeout(r, 15_000); // keep-alive tick
           });
+          clearTimeout(timer);
           wake = undefined;
         }
         const ev = queue.shift();
@@ -93,12 +180,15 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
   app.get("/paypal/return", async (c) => {
     const orderId = c.req.query("token");
     if (!orderId) return c.text("missing token", 400);
+    const tabId = service.findByOrder(orderId)?.request.tabId;
+    if (!tabId) return c.redirect("/");
     try {
-      const tabId = await service.onApproved(orderId);
+      await service.onApproved(orderId);
       return c.redirect(`/tab/${tabId}?approved=1`);
     } catch (err) {
-      const tabId = service.findByOrder(orderId)?.request.tabId;
-      return c.redirect(tabId ? `/tab/${tabId}?error=${encodeURIComponent((err as Error).message)}` : "/");
+      console.error("authorize", tabId, err);
+      const msg = err instanceof PayPalError ? `PayPal could not authorize the payment (${err.code}).` : "Could not open the tab.";
+      return c.redirect(`/tab/${tabId}?error=${encodeURIComponent(msg)}`);
     }
   });
 
@@ -125,7 +215,11 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
     });
     app.post("/simulated/approve", async (c) => {
       const form = await c.req.parseBody();
-      return c.redirect(rail.approve(String(form.token ?? "")));
+      try {
+        return c.redirect(rail.approve(String(form.token ?? "")));
+      } catch {
+        return c.text("unknown order", 404);
+      }
     });
   }
 

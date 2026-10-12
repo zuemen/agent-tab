@@ -8,7 +8,8 @@ import { buildDemo } from "./app.ts";
 if (existsSync(".env")) process.loadEnvFile(".env");
 
 const port = Number(process.env.PORT ?? 4020);
-const publicUrl = (process.env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, "");
+// Render sets RENDER_EXTERNAL_URL; PayPal must redirect back to a public URL, not localhost.
+const publicUrl = (process.env.PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://localhost:${port}`).replace(/\/$/, "");
 const hasPayPal = !!(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
 
 let rail: PayPalRail;

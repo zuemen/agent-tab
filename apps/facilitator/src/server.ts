@@ -20,8 +20,13 @@ function bearer(header: string | undefined): string | undefined {
   return m?.[1];
 }
 
+/**
+ * Client IP for rate limiting. Behind one reverse proxy (e.g. Render) the proxy
+ * appends the real address last; earlier X-Forwarded-For entries are client-supplied.
+ */
 export function clientIp(c: Context): string {
-  return (c.req.header("x-forwarded-for")?.split(",")[0] ?? "").trim() || "local";
+  const parts = (c.req.header("x-forwarded-for") ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  return parts.at(-1) ?? "local";
 }
 
 /** Fixed-window limiter keyed by an arbitrary string. */

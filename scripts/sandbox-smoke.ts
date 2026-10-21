@@ -2,7 +2,9 @@
  * PayPal sandbox smoke test for the money path AgentTab depends on:
  *   create AUTHORIZE order -> buyer approves -> authorize
  *   -> partial capture (final_capture=false) -> retry with same PayPal-Request-Id
- *   -> second partial capture -> final capture | void remainder
+ *   -> second partial capture -> order lookup (captures by invoice id)
+ *   -> [final path] refund + idempotent retry + order lookup (refunds by invoice id)
+ *   -> final capture | void remainder
  *   -> (optional) payout
  *
  * Usage:  npx tsx scripts/sandbox-smoke.ts [final|void|both]
@@ -109,6 +111,26 @@ async function scenario(path: "final" | "void") {
     const c = await rail.captureAuthorization({ authorizationId, amountCents: 30, final: false, requestId: `${run}-${path}-cap2`, invoiceId: `${run}-${path}-2` });
     return { captureId: c.captureId, status: c.status };
   }, false).catch(() => undefined);
+
+  // Reconciliation reads captures and refunds back from the order and matches them by invoice id.
+  await attempt(`${path}:order_lists_captures_with_invoice_ids`, async () => {
+    const caps = await rail.getOrderCaptures(token);
+    return { captures: caps.map((c) => ({ captureId: c.captureId, status: c.status, invoiceId: c.invoiceId ?? null })), cap1Found: caps.some((c) => c.invoiceId === `${run}-${path}-1`) };
+  }).catch(() => undefined);
+  if (path === "final") {
+    await attempt("final:refund_5c_of_capture_1", async () => {
+      const r = await rail.refundCapture({ captureId: String(cap1.captureId), amountCents: 5, requestId: `${run}-refund-1`, invoiceId: `${run}-refund-1` });
+      return { refundId: r.refundId, status: r.status };
+    }).catch(() => undefined);
+    await attempt("final:retry_refund_same_request_id", async () => {
+      const r = await rail.refundCapture({ captureId: String(cap1.captureId), amountCents: 5, requestId: `${run}-refund-1`, invoiceId: `${run}-refund-1` });
+      return { refundId: r.refundId, status: r.status };
+    }).catch(() => undefined);
+    await attempt("final:order_lists_refunds_with_invoice_ids", async () => {
+      const refunds = await rail.getOrderRefunds(token);
+      return { refunds: refunds.map((r) => ({ refundId: r.refundId, status: r.status, invoiceId: r.invoiceId ?? null })), refundFound: refunds.some((r) => r.invoiceId === `${run}-refund-1`), count: refunds.length };
+    }).catch(() => undefined);
+  }
 
   if (path === "final") {
     await attempt(`final:final_capture ($0.10, final=true)`, async () => {

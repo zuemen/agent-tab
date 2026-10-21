@@ -59,7 +59,9 @@ export class SimulatedRail implements PayPalRail {
   readonly requestIds: { kind: "capture" | "void" | "payout" | "refund"; requestId: string }[] = [];
   private readonly replies = new Map<string, unknown>();
   /** Inject failures in tests: return an error to throw for the next call of that kind. */
-  failNext: Partial<Record<"capture" | "authorize" | "void" | "payout" | "lookup" | "refund", PayPalError>> = {};
+  failNext: Partial<Record<"capture" | "authorize" | "void" | "payout" | "lookup" | "refundLookup" | "refund", PayPalError>> = {};
+  /** Tests: every order lookup (captures and refunds) fails while this is set. */
+  lookupsDown?: PayPalError;
   /** Tests: apply the next refund, then answer with this error. */
   ghostNextRefund?: PayPalError;
 
@@ -158,6 +160,7 @@ export class SimulatedRail implements PayPalRail {
   }
 
   async getOrderCaptures(orderId: string): Promise<OrderCapture[]> {
+    if (this.lookupsDown) throw this.lookupsDown;
     this.takeFailure("lookup");
     return this.getOrderCapturesUnchecked(orderId);
   }
@@ -193,7 +196,8 @@ export class SimulatedRail implements PayPalRail {
   }
 
   async getOrderRefunds(orderId: string): Promise<OrderRefund[]> {
-    this.takeFailure("lookup");
+    if (this.lookupsDown) throw this.lookupsDown;
+    this.takeFailure("refundLookup");
     const captureIds = new Set((await this.getOrderCapturesUnchecked(orderId)).map((c) => c.captureId));
     return this.refunds.filter((r) => captureIds.has(r.captureId)).map(({ captureId: _c, ...r }) => r);
   }

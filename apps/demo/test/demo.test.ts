@@ -41,13 +41,17 @@ async function approveDemoTab(): Promise<string> {
   );
   owners.set(start.tabId, new URL(start.reviewUrl).hash.replace("#owner=", ""));
   const view = await fetch(`${base}/api/tabs/${start.tabId}`, { headers: H(start.tabId) }).then((r) => r.json());
-  const { approveUrl } = await fetch(`${base}/api/tabs/${start.tabId}/terms`, {
+  const terms = await fetch(`${base}/api/tabs/${start.tabId}/terms`, {
     method: "POST",
     headers: H(start.tabId),
     body: JSON.stringify(view.suggested),
-  }).then((r) => r.json() as Promise<{ approveUrl: string }>);
+  });
+  const cookie = terms.headers.get("set-cookie")!.split(";")[0]!;
+  const { approveUrl } = (await terms.json()) as { approveUrl: string };
   const returnUrl = rail.approve(new URL(approveUrl).searchParams.get("token")!);
-  await fetch(returnUrl, { redirect: "manual" });
+  // The owner's browser comes back from PayPal with its cookie and receives a fresh owner key.
+  const back = await fetch(returnUrl, { redirect: "manual", headers: { cookie } });
+  owners.set(start.tabId, /#owner=([A-Za-z0-9_-]+)/.exec(back.headers.get("location") ?? "")![1]!);
   return start.tabId;
 }
 
@@ -112,10 +116,10 @@ describe("all-in-one demo", () => {
     const req = demo.service.requestTab({ agentPublicKey: keys.publicKey, purpose: "stub run", suggested: { sellers: ["harbor-gazette"] } });
     owners.set(req.tabId, req.ownerKey);
     const view = await fetch(`${base}/api/tabs/${req.tabId}`, { headers: H(req.tabId) }).then((r) => r.json());
-    const { approveUrl } = await demo.service.approveTerms(req.tabId, view.suggested);
+    const { approveUrl, binding } = await demo.service.approveTerms(req.tabId, view.suggested);
     const token = new URL(approveUrl).searchParams.get("token")!;
     rail.approve(token);
-    await demo.service.onApproved(token);
+    owners.set(req.tabId, (await demo.service.onApproved(token, binding)).ownerKey!);
     expect(tabId).not.toBe(req.tabId);
 
     const conn = await connectSeller("harbor-gazette", "Harbor Gazette", new StreamableHTTPClientTransport(new URL(`${base}/mcp/harbor-gazette`)), "paypal:simulated", () => ({ tabId: req.tabId, keys }));

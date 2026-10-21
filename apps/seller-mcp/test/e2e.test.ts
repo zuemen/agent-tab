@@ -51,7 +51,7 @@ async function openTab(terms: Partial<{ budgetUsd: string; perCallCapUsd: string
     body: JSON.stringify({ agentPublicKey: keys.publicKey, purpose: "Research an oat cold brew launch", agentName: "Test agent" }),
   }).then((r) => r.json() as Promise<{ tabId: string; reviewUrl: string }>);
   owner = new URL(req.reviewUrl).hash.replace("#owner=", "");
-  const approve = await fetch(`${base}/api/tabs/${req.tabId}/terms`, {
+  const termsRes = await fetch(`${base}/api/tabs/${req.tabId}/terms`, {
     method: "POST",
     headers: H(),
     body: JSON.stringify({
@@ -62,12 +62,15 @@ async function openTab(terms: Partial<{ budgetUsd: string; perCallCapUsd: string
       expiresInHours: 2,
       ...terms,
     }),
-  }).then((r) => r.json() as Promise<{ approveUrl: string }>);
-  // The human clicks approve; PayPal redirects back to our return URL.
+  });
+  const cookie = termsRes.headers.get("set-cookie")!.split(";")[0]!;
+  const approve = (await termsRes.json()) as { approveUrl: string };
+  // The human clicks approve; PayPal redirects their browser (with its cookie) back to our return URL.
   const token = new URL(approve.approveUrl).searchParams.get("token")!;
   const returnUrl = rail.approve(token);
-  const res = await fetch(returnUrl, { redirect: "manual" });
+  const res = await fetch(returnUrl, { redirect: "manual", headers: { cookie } });
   expect(res.status).toBe(302);
+  owner = /#owner=([A-Za-z0-9_-]+)/.exec(res.headers.get("location") ?? "")![1]!;
   tab = { tabId: req.tabId, keys };
   return req.tabId;
 }

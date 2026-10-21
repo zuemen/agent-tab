@@ -124,7 +124,9 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
 
   app.get("/api/tabs/:id", (c) => {
     const id = tabOf(c);
-    return c.json(isOwner(c, id) ? { ...service.view(id), owner: true } : { ...service.publicView(id), owner: false });
+    if (!isOwner(c, id)) return c.json({ ...service.publicView(id), owner: false });
+    // Whether this browser set the terms: if not, someone else holding the review link did.
+    return c.json({ ...service.view(id), owner: true, termsSetHere: service.bindingMatches(id, getCookie(c, bindingCookie(id))) });
   });
 
   app.post("/api/tabs/:id/terms", async (c) => {
@@ -133,7 +135,7 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
     setCookie(c, bindingCookie(id), binding, {
       httpOnly: true,
       sameSite: "Lax", // sent on PayPal's top-level redirect back to us
-      path: "/paypal",
+      path: "/",
       maxAge: 3 * 3600,
       secure: service.config.publicUrl.startsWith("https:"),
     });
@@ -206,8 +208,9 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
     const tabId = service.findByOrder(orderId)?.request.tabId;
     if (!tabId) return c.redirect("/");
     try {
-      const { ownerKey } = await service.onApproved(orderId, getCookie(c, bindingCookie(tabId)));
-      deleteCookie(c, bindingCookie(tabId), { path: "/paypal" });
+      const { ownerKey, needsOwnerBrowser } = await service.onApproved(orderId, getCookie(c, bindingCookie(tabId)));
+      if (needsOwnerBrowser) return c.redirect(`/tab/${tabId}?finish=elsewhere`);
+      deleteCookie(c, bindingCookie(tabId), { path: "/" });
       // The fresh owner key travels in the fragment, which the browser keeps across the redirect and never sends to a server.
       return c.redirect(`/tab/${tabId}?approved=1${ownerKey ? `#owner=${ownerKey}` : ""}`);
     } catch (err) {

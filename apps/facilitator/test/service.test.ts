@@ -24,7 +24,7 @@ function setup() {
 
 async function openTab(terms: Partial<{ budgetUsd: string; captureThresholdUsd: string; perCallCapUsd: string }> = {}) {
   const req = svc.requestTab({ agentPublicKey: keys.publicKey, purpose: "test" });
-  const { approveUrl } = await svc.approveTerms(req.tabId, {
+  const { approveUrl, binding } = await svc.approveTerms(req.tabId, {
     budgetUsd: "2.00",
     perCallCapUsd: "0.50",
     captureThresholdUsd: "0.10",
@@ -34,7 +34,7 @@ async function openTab(terms: Partial<{ budgetUsd: string; captureThresholdUsd: 
   });
   const token = new URL(approveUrl).searchParams.get("token")!;
   rail.approve(token);
-  await svc.onApproved(token);
+  await svc.onApproved(token, binding);
   return req;
 }
 
@@ -111,11 +111,11 @@ describe("PayPal statuses are the source of truth", () => {
 
   it("an authorization that is not CREATED never opens the tab", async () => {
     const req = svc.requestTab({ agentPublicKey: keys.publicKey, purpose: "p" });
-    const { approveUrl } = await svc.approveTerms(req.tabId, { budgetUsd: "1.00", perCallCapUsd: "0.10", captureThresholdUsd: "0.10", sellers: ["news"], expiresInHours: 1 });
+    const { approveUrl, binding } = await svc.approveTerms(req.tabId, { budgetUsd: "1.00", perCallCapUsd: "0.10", captureThresholdUsd: "0.10", sellers: ["news"], expiresInHours: 1 });
     const token = new URL(approveUrl).searchParams.get("token")!;
     rail.approve(token);
     rail.nextAuthorizationStatus = "DENIED";
-    await svc.onApproved(token);
+    await svc.onApproved(token, binding);
     const v = view(req.tabId);
     expect(v.status).toBe("cancelled");
     expect(v.notice).toMatch(/DENIED/);
@@ -130,6 +130,9 @@ describe("PayPal statuses are the source of truth", () => {
     let v: any = view(tabId);
     expect(v.status).toBe("active");
     expect(v.captures[0]).toMatchObject({ status: "pending", requestId: `${tabId}-capture-1` });
+    await svc.sweep(); // inside the backoff window: not retried yet
+    expect(rail.requestIds.filter((r) => r.kind === "capture")).toHaveLength(1);
+    later();
     await svc.sweep();
     v = view(tabId);
     expect(v.captures).toHaveLength(1);
@@ -330,7 +333,6 @@ describe("refunds that are in flight when the tab closes", () => {
     const proposal = svc.proposeRefund(tabId, 1, "wrong article");
     rail.failNext.refund = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
     expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("pending");
-    rail.failNext.refund = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
     let v: any = await svc.close(tabId, "closed_by_user");
     expect(v.status).toBe("closing");
     expect(v.payout).toBeUndefined();
@@ -350,6 +352,7 @@ describe("refunds that are in flight when the tab closes", () => {
     rail.ghostNextRefund = new PayPalError("lost answer", 503, "SERVICE_UNAVAILABLE");
     expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("pending");
     rail.forgetRequestIds(); // PayPal no longer remembers the request id
+    later();
     expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("completed");
     expect(rail.refunds).toHaveLength(1);
     expect(rail.requestIds.filter((r) => r.kind === "refund")).toHaveLength(1); // the retry never reached the refund endpoint
@@ -370,6 +373,7 @@ describe("F8: refunds never exceed what the call cost", () => {
 
 describe("F5: the owner key in the review link stops working once the owner approves in PayPal", () => {
   async function throughPayPal(withCookie: boolean) {
+    // withCookie=false: the redirect arrives from somewhere other than the browser that set the terms.
     const app = createApp(svc);
     const { tabId, ownerKey } = svc.requestTab({ agentPublicKey: keys.publicKey, purpose: "p" });
     const terms = await app.request(`/api/tabs/${tabId}/terms`, {
@@ -402,10 +406,32 @@ describe("F5: the owner key in the review link stops working once the owner appr
     expect(again.headers.get("location")).toMatch(/approved=1$/);
   });
 
-  it("a redirect without the browser's cookie opens the tab but hands out no key", async () => {
-    const { ownerKey, location, close } = await throughPayPal(false);
+  it("a redirect without the owner's cookie (e.g. an agent racing the owner) opens nothing and cannot stop the owner's rotation", async () => {
+    const { ownerKey, location, close, replay } = await throughPayPal(false);
+    expect(location).toMatch(/finish=elsewhere/);
     expect(location).not.toMatch(/#owner=/);
-    expect((await close(ownerKey)).status).toBe(200);
+    expect(view(new URL(location, "http://x").pathname.split("/")[2]!).status).toBe("awaiting_approval");
+    // The owner's own redirect still wins and kills the review-link key.
+    const res = await replay();
+    expect(res.headers.get("location")).toMatch(/approved=1#owner=/);
+    expect((await close(ownerKey)).status).toBe(403);
+  });
+
+  it("the owner's page can tell when someone else submitted the terms", async () => {
+    const app = createApp(svc);
+    const { tabId, ownerKey } = svc.requestTab({ agentPublicKey: keys.publicKey, purpose: "p" });
+    const headers = { "content-type": "application/json", "x-agenttab-owner": ownerKey };
+    // The agent, holding the review link, sets the terms itself and keeps the cookie.
+    const terms = await app.request(`/api/tabs/${tabId}/terms`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ budgetUsd: "1.00", perCallCapUsd: "0.10", captureThresholdUsd: "0.10", sellers: ["news"], expiresInHours: 1 }),
+    });
+    const agentCookie = terms.headers.get("set-cookie")!.split(";")[0]!;
+    const asOwner = await (await app.request(`/api/tabs/${tabId}`, { headers })).json();
+    expect(asOwner).toMatchObject({ status: "awaiting_approval", termsSetHere: false });
+    const asAgent = await (await app.request(`/api/tabs/${tabId}`, { headers: { ...headers, cookie: agentCookie } })).json();
+    expect(asAgent.termsSetHere).toBe(true);
   });
 });
 
@@ -435,5 +461,82 @@ describe("F6 and F7: robustness of the HTTP API", () => {
     expect((await ask(proxied, "9.9.9.9, 1.1.1.1")).status).toBe(201);
     expect((await ask(proxied, "8.8.8.8, 1.1.1.1")).status).toBe(429);
     expect((await ask(proxied, "2.2.2.2")).status).toBe(201);
+  });
+});
+
+describe("second review: money paths", () => {
+  it("R1: a capture whose fate is unknown is never resent while PayPal's records cannot be read", async () => {
+    const { tabId } = await openTab();
+    rail.ghostNextCapture = new PayPalError("lost answer", 422, "UNPROCESSABLE_ENTITY");
+    rail.lookupsDown = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    pay(tabId, "news", 300_000);
+    await settleCaptures();
+    rail.forgetRequestIds(); // PayPal would treat a resend as a new capture
+    for (let i = 0; i < 4; i++) {
+      later();
+      await svc.sweep();
+    }
+    expect(rail.requestIds.filter((r) => r.kind === "capture")).toHaveLength(1);
+    expect(view(tabId).captures[0]).toMatchObject({ status: "pending" });
+    delete rail.lookupsDown;
+    later();
+    await svc.sweep();
+    expect(view(tabId).captures[0]).toMatchObject({ status: "completed" });
+    expect(rail.captures.filter((c) => c.status === "COMPLETED").reduce((s, c) => s + c.amountCents, 0)).toBe(30);
+  });
+
+  it("R2: close waits for a PENDING capture before the final capture, so a later decline is collected again", async () => {
+    const { tabId } = await openTab();
+    rail.nextCaptureStatus = "PENDING";
+    pay(tabId, "news", 200_000);
+    await settleCaptures();
+    pay(tabId, "news", 50_000); // below the threshold: left for the final capture
+    let v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closing");
+    expect(v.captures).toHaveLength(1); // no final capture yet
+    rail.captures[0]!.status = "DECLINED";
+    later();
+    await svc.sweep();
+    v = view(tabId);
+    expect(v.status).toBe("closed");
+    expect(v.totals.captured).toBe("0.25");
+    expect(v.captures.map((c: any) => [c.status, c.amountCents])).toEqual([["failed", 20], ["completed", 25]]);
+  });
+
+  it("R3: a refund cannot be confirmed while sellers' payouts are being sent", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 100_000);
+    pay(tabId, "data", 100_000);
+    await settleCaptures();
+    rail.failNext.payout = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    await svc.close(tabId, "closed_by_user");
+    const proposal = svc.proposeRefund(tabId, 1, "x");
+    await expect(svc.confirmRefund(tabId, proposal.id)).rejects.toThrow(/being paid/);
+    later();
+    await svc.sweep();
+    expect(view(tabId).payout.status).toBe("completed");
+    // Afterwards it is allowed; the platform absorbs it because the seller was already paid.
+    expect(await svc.confirmRefund(tabId, proposal.id)).toMatchObject({ status: "completed", afterPayout: true });
+  });
+
+  it("R6: a refund whose fate stays unknown is withheld from the seller's payout", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 100_000);
+    pay(tabId, "data", 100_000);
+    await settleCaptures();
+    const proposal = svc.proposeRefund(tabId, 1, "x");
+    rail.ghostNextRefund = new PayPalError("lost answer", 503, "SERVICE_UNAVAILABLE");
+    await svc.confirmRefund(tabId, proposal.id);
+    rail.lookupsDown = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    for (let i = 0; i < 10; i++) {
+      later();
+      await svc.sweep();
+    }
+    const r = view(tabId).refunds[0];
+    expect(r).toMatchObject({ status: "failed", unverified: true });
+    expect(() => svc.proposeRefund(tabId, 1, "again")).toThrow(/already/);
+    delete rail.lookupsDown;
+    const v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.payout.lines).toEqual([{ seller: "data", amountCents: 9, amount: "0.09" }]);
   });
 });

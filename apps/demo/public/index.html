@@ -335,6 +335,7 @@ function renderPublic() {
     <div class="eyebrow">Tab ${esc(short(TAB.tabId))}</div>
     <h2 style="margin-top:10px">This tab is ${esc(String(TAB.status).replace(/_/g, " "))}</h2>
     ${TAB.remaining ? `<p class="muted">Remaining budget ${money(TAB.remaining)} · per-call cap ${money(TAB.perCallCap)}</p>` : ""}
+    ${new URLSearchParams(location.search).get("finish") === "elsewhere" ? `<div class="note warn" style="margin-bottom:16px">PayPal received your approval. To open the tab, go back to the browser where you reviewed the terms and press <b>Finish</b> there.</div>` : ""}
     <p class="muted">Only the person who opened it can see the details and manage it, from the link they received. Open that link on this device.</p>
     <a class="cta" href="/">AgentTab home</a></div></div>`;
 }
@@ -403,7 +404,8 @@ function renderDashboard(q) {
   if (TAB.notice) notes.push(`<div class="note err">${esc(TAB.notice)}</div>`);
   if (RUNNOTE) notes.push(`<div class="note warn">${esc(RUNNOTE)}</div>`);
   if (TAB.status === "closing" && TAB.closeReason !== "capture_failed") notes.push(`<div class="note warn">Closing: waiting on PayPal for the last steps. This page updates by itself.</div>`);
-  if (TAB.status === "awaiting_approval") notes.push(`<div class="note warn">Waiting for PayPal approval. If you closed the PayPal window, start again from the review page.</div>`);
+  if (TAB.status === "awaiting_approval" && TAB.termsSetHere) notes.push(`<div class="note warn">Waiting for PayPal approval. Approved on another device? <button class="linkbtn" id="finish">Finish here</button></div>`);
+  if (TAB.status === "awaiting_approval" && !TAB.termsSetHere) notes.push(`<div class="note err">The terms for this tab were submitted from another browser or program, not from this one. If that was not you, do not approve anything at PayPal. <button class="linkbtn" id="cancel-tab">Cancel this tab</button></div>`);
 
   const rows = [];
   const refunded = new Set((TAB.refunds || []).filter((r) => r.status !== "failed").map((r) => r.entrySeq));
@@ -495,6 +497,9 @@ ${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charg
   }));
   on("close", () => act("close"));
   on("revoke", () => act("revoke"));
+  on("cancel-tab", () => act("close"));
+  // Same-origin navigation carries this browser's binding cookie, which is what PayPal's redirect lacked.
+  on("finish", () => { location.href = "/paypal/return?token=" + encodeURIComponent(TAB.paypal?.orderId || ""); });
 }
 
 async function act(kind) {

@@ -40,6 +40,9 @@ export interface CaptureRecord {
   /** PayPal's capture status. Only COMPLETED counts as money received. */
   paypalStatus?: string;
   error?: string;
+  /** Unclear failures so far, and when the next attempt may run (backoff). */
+  attempts?: number;
+  nextAttemptAt?: number;
 }
 
 /** A refund of one paid call, proposed (e.g. by the assistant) and executed after the owner confirms. */
@@ -54,8 +57,14 @@ export interface RefundRecord {
   reason: string;
   status: "proposed" | "pending" | "completed" | "failed";
   createdAt: number;
-  /** Times the refund was sent to PayPal; bounded. */
+  /** Attempts so far (sends and lookups); bounded. */
   attempts?: number;
+  nextAttemptAt?: number;
+  /**
+   * Gave up without learning from PayPal whether the refund happened. Treated
+   * as refunded when paying the seller, so the platform never overpays.
+   */
+  unverified?: boolean;
   paypalRefundId?: string;
   /** Refunded after sellers were paid out: the platform absorbed it. */
   afterPayout?: boolean;
@@ -75,6 +84,7 @@ export interface PayoutRecord {
   error?: string;
   /** Temporary failures so far; bounded, then the payout is left for manual follow-up. */
   attempts?: number;
+  nextAttemptAt?: number;
 }
 
 export interface TabState {
@@ -93,8 +103,7 @@ export interface TabState {
   /** Whether the unused part of the authorization was released. "failed" is final: PayPal lets it expire. */
   voidStatus?: "not_needed" | "voided" | "retrying" | "failed";
   voidAttempts?: number;
-  /** A closing step failed temporarily; sweep() waits until then before trying again. */
-  retryAt?: number;
+  voidRetryAt?: number;
   closeReason?: CloseReason;
   payout?: PayoutRecord;
   refunds?: RefundRecord[];
@@ -347,12 +356,15 @@ export function markClosed(tab: TabState, voided: boolean): void {
   tab.voided = voided;
 }
 
-/** Cents refunded (completed) per seller and in total. */
+/** A refund that took, or may have taken, money back from a capture. */
+const refundCounts = (r: RefundRecord) => r.status === "completed" || (r.status === "failed" && !!r.unverified);
+
+/** Cents refunded (completed, or possibly completed) per seller and in total. */
 function refundTotals(tab: TabState): { total: number; bySeller: Map<string, number> } {
   const bySeller = new Map<string, number>();
   let total = 0;
   for (const r of tab.refunds ?? []) {
-    if (r.status !== "completed" || r.afterPayout) continue;
+    if (!refundCounts(r) || r.afterPayout) continue;
     bySeller.set(r.seller, (bySeller.get(r.seller) ?? 0) + r.amountCents);
     total += r.amountCents;
   }
@@ -400,14 +412,15 @@ export function computePayouts(tab: TabState, platformFeeBps: number): PayoutRec
 export function planRefund(tab: TabState, entrySeq: number): Result<{ seller: string; amountCents: number; paypalCaptureId: string }> {
   const entry = tab.entries.find((e) => e.seq === entrySeq);
   if (!entry) return reject("UNKNOWN_RESERVATION", `no paid call #${entrySeq} on this tab`);
-  if ((tab.refunds ?? []).some((r) => r.entrySeq === entrySeq && r.status !== "failed")) {
+  const live = (r: RefundRecord) => r.status !== "failed" || !!r.unverified;
+  if ((tab.refunds ?? []).some((r) => r.entrySeq === entrySeq && live(r))) {
     return reject("REPLAYED_NONCE", `call #${entrySeq} was already refunded or has a refund pending`);
   }
   const amountCents = Math.floor(entry.amountMicros / MICROS_PER_CENT);
   if (amountCents < 1) return reject("INVALID_AMOUNT", `call #${entrySeq} cost less than one cent, which PayPal cannot refund`);
   const refundedFrom = new Map<string, number>();
   for (const r of tab.refunds ?? []) {
-    if (r.status !== "failed") refundedFrom.set(r.paypalCaptureId, (refundedFrom.get(r.paypalCaptureId) ?? 0) + r.amountCents);
+    if (live(r)) refundedFrom.set(r.paypalCaptureId, (refundedFrom.get(r.paypalCaptureId) ?? 0) + r.amountCents);
   }
   const usable = tab.captures
     .filter((c) => c.status === "completed" && c.paypalCaptureId && (c.paypalStatus ?? "COMPLETED") === "COMPLETED")

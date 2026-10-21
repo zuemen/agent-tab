@@ -67,13 +67,13 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 | Per-call cap | Facilitator (`checkCharge`) |
 | Seller allowlist | Facilitator |
 | Expiry ≤ 60 hours | Mandate validation. PayPal honors authorized funds for 3 days ([auth honor period](https://developer.paypal.com/docs/checkout/standard/customize/authorization/)); 60 hours leaves a 12-hour margin for retries |
-| Only the owner manages the tab | An owner key, stored only as a hash, is required to set terms, close, revoke, refund, ask the assistant, or follow the live ledger. The review link's key is replaced when PayPal sends the owner back after approval, and only the browser that went to PayPal receives the new one, so the requesting agent's copy stops working |
+| Only the owner manages the tab | An owner key, stored only as a hash, is required to set terms, close, revoke, refund, ask the assistant, or follow the live ledger. Only the browser that submitted the terms (it holds an HttpOnly cookie) can open the tab after PayPal approval; it receives a new key and the review-link key, which the requesting agent also saw, stops working. If the terms were submitted elsewhere, the owner's page says so and offers to cancel |
 | Charge = seller's actual price and item | The agent signs `{tab, seller, item, amount, nonce, expiry}` with its Ed25519 key; the facilitator rejects anything that differs from the seller's requirements |
 | No replay, no forgery | Nonces are burned on use; only the key on the mandate can sign. The signature protects against sellers and third parties. It does not replace the hard cap, which is the PayPal authorization |
 | Revoke | One call: stop new charges, capture what was used, void the rest |
 | Capture failure | Only captures PayPal reports `COMPLETED` (or `PENDING`) count. Before judging a failure, AgentTab reads the order from PayPal and adopts any capture it missed; if PayPal cannot be asked, nothing is judged and the capture is retried with the same `PayPal-Request-Id`. A definitive refusal, or a `PENDING` capture PayPal later declines, freezes the tab. The authorization is not released while a capture is still `PENDING` |
 | Refunds | Proposed per paid call (by the owner or the assistant), executed only on the owner's confirmation, never more than the call cost, and deducted from that seller's payout. Sellers are paid only after confirmed refunds have gone through; a retried refund is first looked up on the PayPal order so it is never sent twice |
-| Retries | Void, payout and refund retries back off (1 minute doubling to 1 hour) and stop after 8 attempts for manual follow-up. A void that fails never holds up the sellers' payouts |
+| Retries | Capture, void, payout and refund retries each back off on their own schedule (1 minute doubling to 1 hour); void, payout and refund stop after 8 attempts for manual follow-up. A capture or refund whose outcome is unknown is never sent again until PayPal's records show it did not happen. A void that fails never holds up the sellers' payouts |
 
 ## Run it
 
@@ -106,7 +106,7 @@ Each demo seller is a Streamable HTTP MCP server at `http://localhost:4020/mcp/<
 ## Tests
 
 ```bash
-npm test          # 71 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
+npm test          # 77 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
 npm run typecheck
 ```
 
@@ -139,7 +139,7 @@ We did not find a public implementation that combines a single PayPal authorizat
 - **Seller trust.** A seller can settle a charge and return a poor answer. The owner can refund through the tab assistant; disputes beyond that follow PayPal's normal process.
 - **Single process, JSON persistence.** Fine for a demo; a real deployment needs a database.
 - **Tabs longer than 3 days** would need PayPal reauthorization, which is not implemented.
-- **Owner identity.** The review link's owner key is also visible to the requesting agent until the owner approves in PayPal; then it is replaced in the owner's browser only. If the owner approves on a different device than the one that set the terms, the original key keeps working. PayPal's approval page shows the terms and the dashboard shows every charge; production would authenticate the owner directly (for example with Log in with PayPal).
+- **Owner identity.** The review link is a bearer link the requesting agent also sees, so before approval AgentTab cannot fully tell the owner from the agent. The checks are: the terms are shown on PayPal's own approval page, only the browser that submitted the terms can open the tab, and the owner's page warns when the terms came from somewhere else. Production would authenticate the owner directly (for example with Log in with PayPal). Approving at PayPal on another device works; the owner then presses Finish in the browser that submitted the terms.
 - **Refunds below one cent.** PayPal moves whole cents, so a call that cost less than one cent cannot be refunded.
 - **Resource binding.** The item name in a charge comes from the seller's payment requirements; the per-call cap and budget are what bound a dishonest seller.
 

@@ -41,7 +41,7 @@ AgentTab lets a person give an AI agent a **PayPal-authorized spending tab**. Th
 5. **Close or revoke.** New charges stop; remaining usage is captured (final capture), otherwise the authorization is voided; once every capture is `COMPLETED`, sellers are paid with one Payouts batch. Each step that fails for a temporary reason leaves the tab `closing` and a periodic sweep resumes it.
 6. **Refund.** The owner (or the assistant, as a proposal) picks a paid call. The refund is executed only when the owner confirms, against the capture that took that call in, and comes out of that seller's payout. A confirmed refund that is still in flight holds the payout until it resolves.
 
-**Owner key rotation.** Setting the terms also sets an HttpOnly, SameSite=Lax cookie (path `/paypal`) holding a random binding secret; only its hash is stored. When PayPal redirects back, the tab is authorized and, if the redirect carries that cookie, a fresh owner key replaces the old one and is handed to that browser in the redirect's URL fragment. The key the requesting agent saw stops working.
+**Owner key rotation.** Setting the terms also sets an HttpOnly, SameSite=Lax cookie holding a random binding secret; only its hash is stored. A PayPal redirect is acted on only if it carries that cookie: the order is authorized, a fresh owner key replaces the old one and is handed to that browser in the redirect's URL fragment, and the key the requesting agent saw stops working. A redirect without the cookie (another device, or an agent racing the owner) authorizes nothing; the owner finishes from the browser that submitted the terms. The owner's dashboard shows whether the terms were submitted from this browser and warns when they were not.
 
 ## Invariants
 
@@ -60,12 +60,12 @@ AgentTab lets a person give an AI agent a **PayPal-authorized spending tab**. Th
 | PayPal answer | Treatment |
 |---|---|
 | Capture `COMPLETED` | Counted as received. |
-| Capture `PENDING` | Counted as captured (no second capture). Close waits, without voiding or paying out, until reconciliation shows `COMPLETED`. If PayPal later reports it `DECLINED` or `FAILED`, it stops counting, an open tab freezes, and close captures the usage again. |
+| Capture `PENDING` | Counted as captured (no second capture). Close waits, before the final capture and without voiding or paying out, until reconciliation shows `COMPLETED`. If PayPal later reports it `DECLINED` or `FAILED`, it stops counting, an open tab freezes, and close captures the usage again. |
 | Capture `DECLINED` / `FAILED`, or HTTP 422 (after reconciliation finds no capture) | Definitive: the record fails and the tab freezes (no new charges). Close still attempts the final capture. If reconciliation itself cannot reach PayPal, nothing is judged: the record stays pending. |
-| Network error, 5xx, 429, 401/403, 409 | Not definitive: the record stays pending and is retried with the same `PayPal-Request-Id` after reconciliation. |
+| Network error, 5xx, 429, 401/403, 409 | Not definitive: the record stays pending with backoff. It is resent (same `PayPal-Request-Id`) only after reconciliation reads PayPal's records and finds no such capture; while the records cannot be read, nothing is resent. |
 | Void fails | "Nothing left to void" codes count as done. Temporary failures are retried by sweep with backoff (1 min doubling to 1 h, 8 attempts); other failures are final and PayPal lets the hold expire. Sellers are paid either way. |
 | Payout fails | Temporary failures (including 401/403) retry the same batch id with backoff, up to 8 attempts; then, like definitive failures, recorded for manual follow-up. |
-| Refund fails or its answer is lost | Before resending, the order's refunds are read from PayPal and matched by invoice id, so a refund is never sent twice even after PayPal forgets the `PayPal-Request-Id`. Bounded like other retries. |
+| Refund fails or its answer is lost | Before resending, the order's refunds are read from PayPal and matched by invoice id, so a refund is never sent twice even after PayPal forgets the `PayPal-Request-Id`. Bounded like other retries; if PayPal's records stay unreadable, the refund is marked unverified and withheld from the seller's payout. A refund cannot be confirmed while the payout is being sent. |
 
 ## x402 compatibility
 

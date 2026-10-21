@@ -12,10 +12,13 @@ const SELLERS: SellerConfig[] = [
 let rail: SimulatedRail;
 let svc: TabService;
 let keys: AgentKeyPair;
+/** Moves the facilitator's clock forward (retry backoff). Charges are still signed with the real clock. */
+let skew = 0;
 
 function setup() {
   rail = new SimulatedRail("http://x/approve");
-  svc = new TabService(rail, { publicUrl: "http://x", network: "paypal:simulated", platformFeeBps: 1000, sellers: SELLERS });
+  skew = 0;
+  svc = new TabService(rail, { publicUrl: "http://x", network: "paypal:simulated", platformFeeBps: 1000, sellers: SELLERS, now: () => Date.now() + skew });
   keys = generateAgentKeyPair();
 }
 
@@ -55,6 +58,10 @@ function pay(tabId: string, seller: string, amountMicros: number) {
 
 const settleCaptures = () => new Promise((r) => setTimeout(r, 20));
 const view = (tabId: string) => svc.view(tabId) as any;
+/** Past any retry backoff. Pay before calling this: charges are signed with the real clock. */
+const later = () => {
+  skew += 61 * 60 * 1000;
+};
 
 beforeEach(setup);
 
@@ -157,6 +164,104 @@ describe("PayPal statuses are the source of truth", () => {
   });
 });
 
+describe("PayPal failures that must not cost the buyer twice or stall the close", () => {
+  it("F1: a 422 on capture while the reconciliation lookup also fails keeps the capture pending instead of capturing again", async () => {
+    const { tabId } = await openTab();
+    rail.ghostNextCapture = new PayPalError("lost answer", 422, "UNPROCESSABLE_ENTITY");
+    rail.failNext.lookup = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    pay(tabId, "news", 300_000);
+    await settleCaptures();
+    let v: any = view(tabId);
+    expect(v.status).toBe("active");
+    expect(v.captures).toEqual([expect.objectContaining({ status: "pending" })]);
+    v = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closed");
+    // PayPal took 30 cents exactly once.
+    expect(rail.captures.filter((c) => c.status === "COMPLETED").reduce((s, c) => s + c.amountCents, 0)).toBe(30);
+    expect(v.captures).toEqual([expect.objectContaining({ status: "completed", amountCents: 30 })]);
+  });
+
+  it("F2: a PENDING capture that PayPal later declines fails, the authorization is kept until then, and the close captures again", async () => {
+    const { tabId } = await openTab();
+    rail.nextCaptureStatus = "PENDING";
+    pay(tabId, "news", 200_000);
+    await settleCaptures();
+    let v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closing");
+    expect(v.paypal.voidStatus).toBeUndefined(); // not released while a capture is unsettled
+    rail.captures[0]!.status = "DECLINED";
+    await svc.sweep();
+    v = view(tabId);
+    expect(v.status).toBe("closed");
+    expect(v.captures.map((c: any) => c.status)).toEqual(["failed", "completed"]);
+    expect(v.totals.captured).toBe("0.20");
+    expect(v.payout.lines).toEqual([{ seller: "news", amountCents: 18, amount: "0.18" }]);
+  });
+
+  it("F2: an open tab whose PENDING capture is declined is frozen", async () => {
+    const { tabId } = await openTab();
+    rail.nextCaptureStatus = "PENDING";
+    pay(tabId, "news", 200_000);
+    await settleCaptures();
+    rail.captures[0]!.status = "FAILED";
+    await svc.sweep();
+    const v = view(tabId);
+    expect(v.closeReason).toBe("capture_failed");
+    expect(v.captures[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("F3: a void refused for good does not block payouts and the tab still closes", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 200_000);
+    await settleCaptures();
+    rail.failNext.void = new PayPalError("bad", 400, "INVALID_REQUEST");
+    const v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closed");
+    expect(v.paypal.voidStatus).toBe("failed");
+    expect(rail.payouts).toHaveLength(1);
+  });
+
+  it("F3: a temporarily failing void pays sellers first, then is retried with backoff until it works", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 200_000);
+    await settleCaptures();
+    rail.failNext.void = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    let v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closing");
+    expect(v.paypal.voidStatus).toBe("retrying");
+    expect(rail.payouts).toHaveLength(1);
+    rail.failNext.void = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    await svc.sweep(); // inside the backoff window: not attempted
+    expect(rail.failNext.void).toBeDefined();
+    later();
+    await svc.sweep();
+    expect(view(tabId).paypal.voidStatus).toBe("retrying");
+    later();
+    await svc.sweep();
+    v = view(tabId);
+    expect(v.status).toBe("closed");
+    expect(v.paypal.voidStatus).toBe("voided");
+    expect(rail.payouts).toHaveLength(1);
+  });
+
+  it("F3: a payout that keeps failing with 401 gives up after a bounded number of attempts", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 200_000);
+    await settleCaptures();
+    rail.failNext.payout = new PayPalError("auth", 401, "AUTHENTICATION_FAILURE");
+    await svc.close(tabId, "closed_by_user");
+    for (let i = 0; i < 20 && view(tabId).status === "closing"; i++) {
+      rail.failNext.payout = new PayPalError("auth", 401, "AUTHENTICATION_FAILURE");
+      later();
+      await svc.sweep();
+    }
+    const v = view(tabId);
+    expect(v.status).toBe("closed");
+    expect(v.payout.status).toBe("failed");
+    expect(rail.payouts).toHaveLength(0);
+  });
+});
+
 describe("closing survives temporary failures", () => {
   it("a void that fails with a 503 is retried by sweep", async () => {
     const { tabId } = await openTab({ captureThresholdUsd: "0.10" });
@@ -165,7 +270,8 @@ describe("closing survives temporary failures", () => {
     rail.failNext.void = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
     let v: any = await svc.close(tabId, "closed_by_user");
     expect(v.status).toBe("closing");
-    expect(v.paypal.voidStatus).toBe("failed");
+    expect(v.paypal.voidStatus).toBe("retrying");
+    later();
     await svc.sweep();
     v = view(tabId);
     expect(v.status).toBe("closed");
@@ -179,6 +285,7 @@ describe("closing survives temporary failures", () => {
     rail.failNext.payout = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
     let v: any = await svc.close(tabId, "closed_by_user");
     expect(v.status).toBe("closing");
+    later();
     await svc.sweep();
     v = view(tabId);
     expect(v.status).toBe("closed");

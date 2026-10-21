@@ -71,6 +71,8 @@ export interface PayoutRecord {
   platformFeeCents: number;
   batchId?: string;
   error?: string;
+  /** Temporary failures so far; bounded, then the payout is left for manual follow-up. */
+  attempts?: number;
 }
 
 export interface TabState {
@@ -86,8 +88,11 @@ export interface TabState {
   entries: LedgerEntry[];
   captures: CaptureRecord[];
   voided: boolean;
-  /** Whether the unused part of the authorization was released. */
-  voidStatus?: "not_needed" | "voided" | "failed";
+  /** Whether the unused part of the authorization was released. "failed" is final: PayPal lets it expire. */
+  voidStatus?: "not_needed" | "voided" | "retrying" | "failed";
+  voidAttempts?: number;
+  /** A closing step failed temporarily; sweep() waits until then before trying again. */
+  retryAt?: number;
   closeReason?: CloseReason;
   payout?: PayoutRecord;
   refunds?: RefundRecord[];

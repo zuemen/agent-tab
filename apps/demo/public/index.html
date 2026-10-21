@@ -434,7 +434,7 @@ function renderDashboard(q) {
         ${(TAB.refunds || []).some((r) => r.status === "completed") ? `<dt>Refunded</dt><dd>${money((TAB.refunds.filter((r) => r.status === "completed").reduce((a, r) => a + r.amountCents, 0) / 100).toFixed(2))}</dd>` : ""}
         <dt>Allowed sellers</dt><dd style="font-family:var(--sans)">${m.allowedSellers.map((s) => esc(sellerName(s))).join("<br>")}</dd>
       </dl>` : ""}
-      <div class="refs"><b>PayPal order</b> ${esc(p.orderId || "—")}<br><b>Authorization</b> ${esc(p.authorizationId || "—")}${p.voided ? "<br><b>Remainder</b> released (voided)" : ""}${TAB.closeReason ? `<br><b>Closed</b> ${esc(TAB.closeReason.replace(/_/g, " "))}` : ""}</div>
+      <div class="refs"><b>PayPal order</b> ${esc(p.orderId || "—")}<br><b>Authorization</b> ${esc(p.authorizationId || "—")}${p.voided ? "<br><b>Remainder</b> released (voided)" : p.voidStatus === "retrying" ? "<br><b>Remainder</b> release pending, retrying" : p.voidStatus === "failed" ? "<br><b>Remainder</b> could not be released; PayPal lets the hold expire" : ""}${TAB.closeReason ? `<br><b>Closed</b> ${esc(TAB.closeReason.replace(/_/g, " "))}` : ""}</div>
       <div class="actions">
         ${active ? `<button class="cta" id="run" ${RUNNING ? "disabled" : ""}>${RUNNING ? "Agent working…" : "Run the agent"}</button>` : ""}
         ${active ? `<button class="ghost" id="close">Close tab</button><button class="ghost danger" id="revoke">Revoke</button>` : ""}
@@ -547,7 +547,7 @@ async function connectEvents(tabId) {
   ES = new EventSource(`/api/tabs/${encodeURIComponent(tabId)}/events?ticket=${encodeURIComponent(ticket)}`);
   ES.onerror = () => { ES.close(); ES = null; setTimeout(() => { if (!ES) connectEvents(tabId); }, 3000); };
   const on = (type, fn) => ES.addEventListener(type, (m) => fn(JSON.parse(m.data)));
-  for (const type of ["tab_active", "charge", "capture_started", "capture_completed", "capture_failed", "capture_retry_pending", "tab_closing", "tab_closed", "authorization_voided", "payout_sent", "payout_failed", "payout_retry_pending", "void_failed", "capture_reconciled", "refund_proposed", "refund_completed", "refund_failed", "assistant"]) on(type, refresh);
+  for (const type of ["tab_active", "charge", "capture_started", "capture_completed", "capture_failed", "capture_retry_pending", "tab_closing", "tab_closed", "authorization_voided", "payout_sent", "payout_failed", "payout_retry_pending", "void_failed", "payout_waiting", "capture_reconciled", "refund_proposed", "refund_completed", "refund_failed", "assistant"]) on(type, refresh);
   on("agent", (ev) => {
     const d = ev.detail;
     if (d.type === "tool_result" || d.type === "thinking") return;

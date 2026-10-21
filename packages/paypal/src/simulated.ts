@@ -55,7 +55,7 @@ export class SimulatedRail implements PayPalRail {
   ghostNextCapture?: PayPalError;
   private readonly replies = new Map<string, unknown>();
   /** Inject failures in tests: return an error to throw for the next call of that kind. */
-  failNext: Partial<Record<"capture" | "authorize" | "void" | "payout", PayPalError>> = {};
+  failNext: Partial<Record<"capture" | "authorize" | "void" | "payout" | "lookup", PayPalError>> = {};
 
   constructor(
     private readonly approveBaseUrl: string,
@@ -150,6 +150,7 @@ export class SimulatedRail implements PayPalRail {
   }
 
   async getOrderCaptures(orderId: string): Promise<OrderCapture[]> {
+    this.takeFailure("lookup");
     const authIds = new Set([...this.authorizations.values()].filter((a) => a.orderId === orderId).map((a) => a.id));
     return this.captures.filter((c) => authIds.has(c.authorizationId)).map(({ captureId, status, amountCents, invoiceId }) => ({ captureId, status, amountCents, ...(invoiceId ? { invoiceId } : {}) }));
   }

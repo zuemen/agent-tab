@@ -106,6 +106,21 @@ const NOTHING_TO_VOID = new Set([
   "AUTHORIZATION_ALREADY_COMPLETED",
 ]);
 
+/** Capture statuses after which PayPal will not collect the money. */
+const FAILED_CAPTURE_STATUSES = new Set(["DECLINED", "FAILED"]);
+
+/** Closing steps (void, payout) are retried this many times with backoff, then given up for manual follow-up. */
+export const MAX_CLOSE_ATTEMPTS = 8;
+const RETRY_BASE_MS = 60 * 1000;
+const RETRY_MAX_MS = 60 * 60 * 1000;
+const backoff = (attempts: number) => Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
+
+/** Worth retrying later: network, 5xx, 429, and auth or conflict problems on our side. */
+function isTemporary(e: unknown): boolean {
+  if (!(e instanceof PayPalError)) return true;
+  return e.retryable || e.httpStatus === 401 || e.httpStatus === 403 || e.httpStatus === 409;
+}
+
 function isDefinitive(e: unknown): boolean {
   return e instanceof PayPalError && (e.httpStatus === 422 || DEFINITIVE_CAPTURE_ERRORS.has(e.code));
 }
@@ -434,15 +449,17 @@ export class TabService {
 
   /**
    * Ask PayPal what it actually captured on this order and adopt any capture
-   * our records missed (matched by invoice id). PayPal is the source of truth.
+   * our records missed (matched by invoice id). PayPal is the source of truth:
+   * a capture it later declines stops counting and freezes an open tab.
+   * Returns false when PayPal could not be asked, so callers judge nothing.
    */
-  private async reconcile(tab: TabState): Promise<void> {
-    if (!tab.paypalOrderId) return;
+  private async reconcile(tab: TabState): Promise<boolean> {
+    if (!tab.paypalOrderId) return true;
     let found;
     try {
       found = await this.rail.getOrderCaptures(tab.paypalOrderId);
     } catch {
-      return; // keep local state; try again later
+      return false; // keep local state; try again later
     }
     const tabId = tab.mandate.tabId;
     for (const rec of tab.captures) {
@@ -457,9 +474,17 @@ export class TabService {
       if (counts) {
         rec.paypalCaptureId = pp.captureId;
         rec.paypalStatus = pp.status;
+      } else if (FAILED_CAPTURE_STATUSES.has(pp.status) && rec.status !== "failed") {
+        rec.status = "failed";
+        rec.paypalCaptureId = pp.captureId;
+        rec.paypalStatus = pp.status;
+        rec.error = `PayPal reported the capture ${pp.status}`;
+        if (tab.status === "active") beginClose(tab, "capture_failed");
+        this.emit(tabId, "capture_failed", { id: rec.id, captureId: pp.captureId, status: pp.status, frozen: true });
       }
     }
     this.persist();
+    return true;
   }
 
   /**
@@ -501,8 +526,14 @@ export class TabService {
       this.emit(tabId, "capture_completed", { id: rec.id, captureId: result.captureId, status: result.status, amount: formatUsd(rec.amountCents * 10_000) });
     } catch (err) {
       if (isDefinitive(err)) {
-        await this.reconcile(tab); // did PayPal take the money anyway?
-        if (rec.status === "completed") return;
+        // Did PayPal take the money anyway? If we cannot find out, judge nothing:
+        // the record stays pending and is retried with the same PayPal-Request-Id.
+        const asked = await this.reconcile(tab);
+        if (rec.status !== "pending") return;
+        if (!asked) {
+          this.emit(tabId, "capture_retry_pending", { id: rec.id, error: "PayPal refused the capture and its records could not be checked" });
+          return;
+        }
         const e = err as PayPalError;
         failCapture(tab, rec.id, `${e.code}: ${e.message}`);
         beginClose(tab, "capture_failed");
@@ -544,8 +575,15 @@ export class TabService {
       await this.runCapture(tab, true);
       if (tab.captures.some((c) => c.status === "pending")) return this.view(tabId);
 
-      // 2. Release the unused part of the authorization.
-      if (tab.voidStatus !== "voided" && tab.voidStatus !== "not_needed") {
+      // Wait until PayPal has settled every capture: one it declines must still be
+      // retried against the authorization, so nothing is released or paid out before.
+      if (tab.captures.some((c) => c.status === "completed" && c.paypalStatus === "PENDING")) {
+        this.emit(tabId, "payout_waiting", { reason: "a capture is still PENDING at PayPal" });
+        return this.view(tabId);
+      }
+
+      // 2. Release the unused part of the authorization. A failure here never holds up the sellers' payouts.
+      if (!tab.voidStatus || tab.voidStatus === "retrying") {
         if (tab.captures.some((c) => c.final && c.status === "completed") || !tab.authorizationId) {
           tab.voidStatus = "not_needed";
         } else {
@@ -558,21 +596,18 @@ export class TabService {
             if (err instanceof PayPalError && NOTHING_TO_VOID.has(err.code)) {
               tab.voidStatus = "not_needed";
             } else {
-              tab.voidStatus = "failed";
-              this.persist();
-              this.emit(tabId, "void_failed", { error: String((err as Error).message) });
-              return this.view(tabId); // retried by sweep
+              tab.voidAttempts = (tab.voidAttempts ?? 0) + 1;
+              const willRetry = isTemporary(err) && tab.voidAttempts < MAX_CLOSE_ATTEMPTS;
+              tab.voidStatus = willRetry ? "retrying" : "failed";
+              if (willRetry) tab.retryAt = this.now() + backoff(tab.voidAttempts);
+              this.emit(tabId, "void_failed", { error: String((err as Error).message), willRetry });
             }
           }
         }
         this.persist();
       }
 
-      // 3. Pay sellers, once PayPal reports every capture COMPLETED.
-      if (tab.captures.some((c) => c.status === "completed" && c.paypalStatus === "PENDING")) {
-        this.emit(tabId, "payout_waiting", { reason: "a capture is still PENDING at PayPal" });
-        return this.view(tabId);
-      }
+      // 3. Pay sellers.
       if (!tab.payout || tab.payout.status === "pending") {
         const payout = tab.payout ?? computePayouts(tab, this.config.platformFeeBps);
         tab.payout = payout;
@@ -593,19 +628,24 @@ export class TabService {
             payout.batchId = res.payoutBatchId;
             this.emit(tabId, "payout_sent", { batchId: res.payoutBatchId, lines: payout.lines });
           } catch (err) {
-            if (err instanceof PayPalError && !err.retryable && err.httpStatus !== 401 && err.httpStatus !== 403) {
-              payout.status = "failed";
-              payout.error = String(err.message);
-              this.emit(tabId, "payout_failed", { error: payout.error });
-            } else {
+            payout.attempts = (payout.attempts ?? 0) + 1;
+            if (isTemporary(err) && payout.attempts < MAX_CLOSE_ATTEMPTS) {
+              tab.retryAt = this.now() + backoff(payout.attempts);
               this.persist();
               this.emit(tabId, "payout_retry_pending", { error: String((err as Error).message) });
               return this.view(tabId); // retried by sweep
             }
+            payout.status = "failed";
+            payout.error = String((err as Error).message);
+            this.emit(tabId, "payout_failed", { error: payout.error });
           }
         } else {
           payout.status = "completed";
         }
+      }
+      if (tab.voidStatus === "retrying") {
+        this.persist();
+        return this.view(tabId); // sellers are paid; sweep keeps trying to release the rest
       }
       markClosed(tab, tab.voidStatus === "voided");
       this.persist();
@@ -683,6 +723,7 @@ export class TabService {
       const tabId = tab.mandate.tabId;
       try {
         const expiry = Math.min(tab.mandate.expiresAt, tab.authorizationExpiresAt ?? Infinity);
+        if (tab.status === "closing" && (tab.retryAt ?? 0) > now) continue; // backing off
         if ((tab.status === "active" && now >= expiry) || tab.status === "closing") {
           await this.close(tabId, "expired");
         } else if (tab.status === "active" && tab.captures.some((c) => c.status === "pending")) {

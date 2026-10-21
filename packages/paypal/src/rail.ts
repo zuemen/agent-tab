@@ -73,7 +73,17 @@ export interface RefundInput {
   captureId: string;
   amountCents: number;
   requestId: string;
+  /** Lets a later lookup find this refund on the order without relying on PayPal-Request-Id caching. */
+  invoiceId?: string;
   noteToPayer?: string;
+}
+
+/** A refund as PayPal reports it on the order (for reconciliation). */
+export interface OrderRefund {
+  refundId: string;
+  status: string;
+  amountCents: number;
+  invoiceId?: string;
 }
 
 export interface RefundResult {
@@ -91,6 +101,8 @@ export interface PayPalRail {
   /** What PayPal actually captured on this order; the source of truth after an unclear failure. */
   getOrderCaptures(orderId: string): Promise<OrderCapture[]>;
   refundCapture(input: RefundInput): Promise<RefundResult>;
+  /** Refunds PayPal has recorded on this order. */
+  getOrderRefunds(orderId: string): Promise<OrderRefund[]>;
 }
 
 /** A PayPal API failure, carrying PayPal's error name and debug id when present. */

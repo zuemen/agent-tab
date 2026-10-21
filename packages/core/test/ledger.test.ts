@@ -188,10 +188,13 @@ describe("batched capture", () => {
     expect(planCapture(tab, true)).toBe(1);
   });
 
-  it("capture ids are stable per attempt for idempotency", () => {
+  it("each capture record has its own PayPal-Request-Id, fixed when the record is created", () => {
     for (let i = 0; i < 4; i++) pay(50_000);
     const cap = beginCapture(tab, 20, false, T0);
     expect(cap.requestId).toBe("tab_test-capture-1");
+    expect(tab.captures[0]!.requestId).toBe("tab_test-capture-1"); // persisted with the record, reused by every retry
+    completeCapture(tab, cap.id, "CAP-1");
+    expect(beginCapture(tab, 1, true, T0).requestId).toBe("tab_test-capture-2");
   });
 });
 

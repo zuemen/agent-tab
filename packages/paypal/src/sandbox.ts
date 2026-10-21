@@ -7,6 +7,7 @@ import {
   type CreateAuthorizeOrderInput,
   type CreatedOrder,
   type OrderCapture,
+  type OrderRefund,
   type PayoutInput,
   type PayoutResult,
   type PayPalRail,
@@ -165,17 +166,29 @@ export class SandboxRail implements PayPalRail {
     await this.api("POST", `/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/void`, requestId);
   }
 
+  private async orderPayments(orderId: string) {
+    type Payment = { id: string; status: string; amount: { value: string }; invoice_id?: string };
+    const order = await this.api<{ purchase_units?: { payments?: { captures?: Payment[]; refunds?: Payment[] } }[] }>(
+      "GET",
+      `/v2/checkout/orders/${encodeURIComponent(orderId)}`,
+    );
+    const units = order?.purchase_units ?? [];
+    const norm = (p: Payment) => ({ id: p.id, status: p.status, amountCents: valueToCents(p.amount.value), ...(p.invoice_id ? { invoiceId: p.invoice_id } : {}) });
+    return { captures: units.flatMap((u) => u.payments?.captures ?? []).map(norm), refunds: units.flatMap((u) => u.payments?.refunds ?? []).map(norm) };
+  }
+
   async getOrderCaptures(orderId: string): Promise<OrderCapture[]> {
-    const order = await this.api<{
-      purchase_units?: { payments?: { captures?: { id: string; status: string; amount: { value: string }; invoice_id?: string }[] } }[];
-    }>("GET", `/v2/checkout/orders/${encodeURIComponent(orderId)}`);
-    const captures = order?.purchase_units?.flatMap((u) => u.payments?.captures ?? []) ?? [];
-    return captures.map((c) => ({ captureId: c.id, status: c.status, amountCents: valueToCents(c.amount.value), ...(c.invoice_id ? { invoiceId: c.invoice_id } : {}) }));
+    return (await this.orderPayments(orderId)).captures.map(({ id, ...c }) => ({ captureId: id, ...c }));
+  }
+
+  async getOrderRefunds(orderId: string): Promise<OrderRefund[]> {
+    return (await this.orderPayments(orderId)).refunds.map(({ id, ...r }) => ({ refundId: id, ...r }));
   }
 
   async refundCapture(input: RefundInput): Promise<RefundResult> {
     const res = await this.api<{ id: string; status: string }>("POST", `/v2/payments/captures/${encodeURIComponent(input.captureId)}/refund`, input.requestId, {
       amount: { currency_code: "USD", value: centsToValue(input.amountCents) },
+      ...(input.invoiceId ? { invoice_id: input.invoiceId } : {}),
       ...(input.noteToPayer ? { note_to_payer: input.noteToPayer.slice(0, 255) } : {}),
     });
     if (!res) throw new PayPalError("empty refund response", 500);

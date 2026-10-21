@@ -35,6 +35,8 @@ const { app, service, ready } = buildDemo({
   ...(process.env.ANTHROPIC_API_KEY ? { anthropicKey: process.env.ANTHROPIC_API_KEY } : {}),
   maxClaudeRunsPerHour: Number(process.env.MAX_CLAUDE_RUNS_PER_HOUR ?? 20),
   webHtml: () => readFileSync(htmlPath, "utf8"),
+  // Behind Render's proxy set TRUST_PROXY_HOPS=1; locally the socket address is used.
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 0),
 });
 
 serve({ fetch: app.fetch, port }, async () => {

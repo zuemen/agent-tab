@@ -209,9 +209,11 @@ const money = (v) => {
 };
 // The owner key arrives once in the link fragment (#owner=...) and is kept on this device only.
 function ownerKey(tabId) { try { return localStorage.getItem("agenttab-owner:" + tabId) || ""; } catch { return ""; } }
+let KEY_FROM_LINK = false;
 function takeOwnerKeyFromHash(tabId) {
   const m = location.hash.match(/owner=([A-Za-z0-9_-]+)/);
   if (!m) return;
+  KEY_FROM_LINK = true;
   try { localStorage.setItem("agenttab-owner:" + tabId, m[1]); } catch {}
   history.replaceState(null, "", location.pathname + location.search);
 }
@@ -395,7 +397,7 @@ function renderDashboard(q) {
   const closed = TAB.status === "closed" || TAB.status === "cancelled";
   const sellerName = (id) => INFO.sellers.find((s) => s.id === id)?.name || id;
   const notes = [];
-  if (q.get("approved") && active && !t.calls) notes.push(`<div class="note">Authorized with PayPal. The hold is in place; nothing has been charged yet.</div>`);
+  if (q.get("approved") && active && !t.calls) notes.push(`<div class="note">Authorized with PayPal. The hold is in place; nothing has been charged yet.${KEY_FROM_LINK ? " This browser now holds a new owner key, so the original review link can no longer manage the tab." : ""}</div>`);
   if (q.get("error")) notes.push(`<div class="note err">${esc(q.get("error"))}</div>`);
   if (TAB.closeReason === "capture_failed") notes.push(`<div class="note err">PayPal refused a capture, so the tab was frozen: no new charges are accepted.</div>`);
   if (TAB.notice) notes.push(`<div class="note err">${esc(TAB.notice)}</div>`);

@@ -31,6 +31,8 @@ export interface DemoOptions {
   anthropicKey?: string;
   maxClaudeRunsPerHour?: number;
   webHtml?: () => string;
+  /** See AppOptions.trustProxyHops. */
+  trustProxyHops?: number;
 }
 
 interface AgentSession {
@@ -73,7 +75,8 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     writeFileSync(keyFile, JSON.stringify(Object.fromEntries([...sessions].map(([id, s]) => [id, s.keys]))));
   };
 
-  const app = createApp(service, opts.webHtml ? { webHtml: opts.webHtml } : {});
+  const app = createApp(service, { ...(opts.webHtml ? { webHtml: opts.webHtml } : {}), trustProxyHops: opts.trustProxyHops ?? 0 });
+  const ip = (c: Context) => clientIp(c, opts.trustProxyHops ?? 0);
   const prepared = new Map<string, PreparedSeller>();
   const startLimiter = rateLimiter(20, 3600_000);
   const claudePerIp = rateLimiter(10, 3600_000);
@@ -82,7 +85,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
   const allowClaude = (c: Context) => {
     const hourAgo = Date.now() - 3600_000;
     while (claudeRuns.length && claudeRuns[0]! < hourAgo) claudeRuns.shift();
-    if (claudeRuns.length >= (opts.maxClaudeRunsPerHour ?? 20) || !claudePerIp(clientIp(c))) return false;
+    if (claudeRuns.length >= (opts.maxClaudeRunsPerHour ?? 20) || !claudePerIp(ip(c))) return false;
     claudeRuns.push(Date.now());
     return true;
   };
@@ -117,7 +120,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
 
   // ---- step 1: the demo agent asks the human for a tab ----
   app.post("/api/demo/start", async (c) => {
-    if (!startLimiter(clientIp(c))) return c.json({ error: "too many demos started from here; try again later" }, 429);
+    if (!startLimiter(ip(c))) return c.json({ error: "too many demos started from here; try again later" }, 429);
     const keys = generateAgentKeyPair();
     const { tabId, reviewUrl } = service.requestTab({
       agentPublicKey: keys.publicKey,

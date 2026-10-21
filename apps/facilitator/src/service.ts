@@ -81,6 +81,11 @@ interface TabRecord {
   payoutReceivers?: Record<string, string>;
   /** Shown to the owner, e.g. why PayPal did not open the tab. */
   notice?: string;
+  /**
+   * sha256 of a secret held in a cookie by the browser that sent the owner to
+   * PayPal. Only that browser receives the new owner key when PayPal sends it back.
+   */
+  approvalBindingHash?: string;
 }
 
 /** PayPal errors after which retrying the same capture cannot succeed. */
@@ -247,7 +252,8 @@ export class TabService {
   /** Only the holder of the owner key may set terms, close, revoke, ask, or refund. */
   isOwner(tabId: string, key: string | undefined): boolean {
     const rec = this.tabs.get(tabId);
-    if (!rec || !key) return false;
+    // Records saved before owner keys existed have no hash: nobody owns them.
+    if (!rec || !key || typeof rec.request.ownerKeyHash !== "string") return false;
     const want = Buffer.from(rec.request.ownerKeyHash, "base64url");
     const got = hashKey(key);
     return want.length === got.length && timingSafeEqual(want, got);
@@ -281,8 +287,11 @@ export class TabService {
     };
   }
 
-  /** Step 2 (human): accept or tighten the terms, then go to PayPal to authorize the budget. */
-  async approveTerms(tabId: string, terms: TabTerms): Promise<{ approveUrl: string }> {
+  /**
+   * Step 2 (human): accept or tighten the terms, then go to PayPal to authorize the budget.
+   * `binding` goes into a cookie in the owner's browser (see onApproved).
+   */
+  async approveTerms(tabId: string, terms: TabTerms): Promise<{ approveUrl: string; binding: string }> {
     return this.withLock(tabId, async () => {
       const rec = this.mustGet(tabId);
       if (rec.state || rec.cancelled) throw new UserError("this tab already has terms");
@@ -302,10 +311,12 @@ export class TabService {
       });
       state.paypalOrderId = order.orderId;
       rec.state = state;
+      const binding = randomBytes(24).toString("base64url");
+      rec.approvalBindingHash = hashKey(binding).toString("base64url");
       rec.payoutReceivers = Object.fromEntries(mandate.allowedSellers.map((id) => [id, this.sellers.get(id)!.payoutReceiver]));
       this.persist();
       this.emit(tabId, "order_created", { orderId: order.orderId });
-      return { approveUrl: order.approveUrl };
+      return { approveUrl: order.approveUrl, binding };
     });
   }
 
@@ -313,14 +324,20 @@ export class TabService {
     return [...this.tabs.values()].find((r) => r.state?.paypalOrderId === orderId);
   }
 
-  /** Step 3 (PayPal redirect): the human approved; authorize the order and open the tab. */
-  async onApproved(orderId: string): Promise<string> {
+  /**
+   * Step 3 (PayPal redirect): the human approved; authorize the order and open the tab.
+   * If the redirect arrives in the browser that went to PayPal (it holds the
+   * binding cookie), the owner key is replaced and the new one returned for that
+   * browser only. The key in the review link, which the requesting agent also
+   * saw, then stops working.
+   */
+  async onApproved(orderId: string, binding?: string): Promise<{ tabId: string; ownerKey?: string }> {
     const rec = this.findByOrder(orderId);
     if (!rec?.state) throw new UserError("unknown PayPal order");
     const tabId = rec.request.tabId;
     return this.withLock(tabId, async () => {
       const state = rec.state!;
-      if (state.status !== "awaiting_approval") return tabId; // repeated redirect
+      if (state.status !== "awaiting_approval") return { tabId }; // repeated redirect
       const auth = await this.rail.authorizeOrder(orderId, `${tabId}-authorize`);
       if (auth.status !== "CREATED") {
         // DENIED or PENDING (under review): funds are not guaranteed, so the tab never opens.
@@ -330,12 +347,18 @@ export class TabService {
         rec.notice = `PayPal returned authorization status ${auth.status}; the tab was not opened and nothing will be charged.`;
         this.persist();
         this.emit(tabId, "tab_cancelled", { authorizationStatus: auth.status });
-        return tabId;
+        return { tabId };
       }
       activateTab(state, { paypalOrderId: orderId, authorizationId: auth.authorizationId, authorizationExpiresAt: auth.expiresAt });
+      let ownerKey: string | undefined;
+      if (binding && rec.approvalBindingHash && timingSafeEqual(hashKey(binding), Buffer.from(rec.approvalBindingHash, "base64url"))) {
+        ownerKey = randomBytes(24).toString("base64url");
+        rec.request.ownerKeyHash = hashKey(ownerKey).toString("base64url");
+        delete rec.approvalBindingHash;
+      }
       this.persist();
-      this.emit(tabId, "tab_active", { authorizationId: auth.authorizationId, budget: formatUsd(state.mandate.budgetMicros) });
-      return tabId;
+      this.emit(tabId, "tab_active", { authorizationId: auth.authorizationId, budget: formatUsd(state.mandate.budgetMicros), ownerKeyRotated: !!ownerKey });
+      return ownerKey ? { tabId, ownerKey } : { tabId };
     });
   }
 
@@ -607,7 +630,14 @@ export class TabService {
         this.persist();
       }
 
-      // 3. Pay sellers.
+      // 3. Pay sellers, once confirmed refunds have gone through: they come out of the payout.
+      if (!tab.payout) {
+        for (const r of tab.refunds ?? []) await this.runRefund(tab, r);
+        if (tab.refunds?.some((r) => r.status === "pending")) {
+          this.emit(tabId, "payout_waiting", { reason: "a confirmed refund is still being processed" });
+          return this.view(tabId);
+        }
+      }
       if (!tab.payout || tab.payout.status === "pending") {
         const payout = tab.payout ?? computePayouts(tab, this.config.platformFeeBps);
         tab.payout = payout;
@@ -680,38 +710,87 @@ export class TabService {
     return refund;
   }
 
-  /** Execute a proposed refund. Re-confirming a pending one retries with the same PayPal-Request-Id. */
+  /** Execute a proposed refund. Re-confirming a pending one retries it. */
   confirmRefund(tabId: string, refundId: string): Promise<RefundRecord> {
     return this.withLock(tabId, async () => {
       const tab = this.mustGet(tabId).state;
       const refund = tab?.refunds?.find((r) => r.id === refundId);
       if (!tab || !refund) throw new UserError("unknown refund");
       if (refund.status === "completed" || refund.status === "failed") return refund;
-      refund.status = "pending";
-      refund.afterPayout = !!tab.payout;
-      this.persist();
-      try {
-        const res = await this.rail.refundCapture({
-          captureId: refund.paypalCaptureId,
-          amountCents: refund.amountCents,
-          requestId: refund.requestId,
-          noteToPayer: `AgentTab refund: paid call #${refund.entrySeq}`,
-        });
-        refund.status = "completed";
-        refund.paypalRefundId = res.refundId;
-        this.emit(tabId, "refund_completed", { id: refund.id, refundId: res.refundId, amount: formatUsd(refund.amountCents * 10_000) });
-      } catch (err) {
-        if (isDefinitive(err)) {
-          refund.status = "failed";
-          refund.error = String((err as Error).message);
-          this.emit(tabId, "refund_failed", { id: refund.id, error: refund.error });
-        } else {
-          this.emit(tabId, "refund_retry_pending", { id: refund.id, error: String((err as Error).message) });
-        }
+      if (refund.status === "proposed") {
+        refund.status = "pending";
+        // Fixed at the first confirm: was this seller already paid when the owner decided?
+        refund.afterPayout = !!tab.payout;
+        this.persist();
       }
-      this.persist();
+      await this.runRefund(tab, refund);
       return refund;
     });
+  }
+
+  /**
+   * One attempt at a pending refund. A retry first asks PayPal whether the
+   * refund already happened (matched by invoice id) instead of trusting
+   * PayPal-Request-Id caching to stop a second refund.
+   */
+  private async runRefund(tab: TabState, refund: RefundRecord): Promise<void> {
+    if (refund.status !== "pending") return;
+    const tabId = tab.mandate.tabId;
+    const invoiceId = `${tabId}-${refund.id}`;
+    if (refund.attempts && tab.paypalOrderId) {
+      let found;
+      try {
+        found = (await this.rail.getOrderRefunds(tab.paypalOrderId)).find((r) => r.invoiceId === invoiceId);
+      } catch {
+        // Cannot tell whether it happened: do not send it again yet. Bounded like any other retry.
+        refund.attempts++;
+        refund.error = "PayPal's records could not be checked";
+        if (refund.attempts >= MAX_CLOSE_ATTEMPTS) {
+          refund.status = "failed";
+          refund.error += "; check the capture in PayPal before refunding by hand";
+          this.emit(tabId, "refund_failed", { id: refund.id, error: refund.error });
+        } else {
+          tab.retryAt = this.now() + backoff(refund.attempts);
+          this.emit(tabId, "refund_retry_pending", { id: refund.id, error: refund.error });
+        }
+        this.persist();
+        return;
+      }
+      if (found && found.status !== "FAILED" && found.status !== "CANCELLED") {
+        refund.status = "completed";
+        refund.paypalRefundId = found.refundId;
+        delete refund.error;
+        this.persist();
+        this.emit(tabId, "refund_completed", { id: refund.id, refundId: found.refundId, amount: formatUsd(refund.amountCents * 10_000) });
+        return;
+      }
+    }
+    refund.attempts = (refund.attempts ?? 0) + 1;
+    this.persist(); // write-ahead: a crash after this point is resolved by the lookup above
+    try {
+      const res = await this.rail.refundCapture({
+        captureId: refund.paypalCaptureId,
+        amountCents: refund.amountCents,
+        requestId: refund.requestId,
+        invoiceId,
+        noteToPayer: `AgentTab refund: paid call #${refund.entrySeq}`,
+      });
+      if (res.status === "FAILED" || res.status === "CANCELLED") throw new PayPalError(`refund returned status ${res.status}`, 422, res.status);
+      refund.status = "completed";
+      refund.paypalRefundId = res.refundId;
+      delete refund.error;
+      this.emit(tabId, "refund_completed", { id: refund.id, refundId: res.refundId, amount: formatUsd(refund.amountCents * 10_000) });
+    } catch (err) {
+      refund.error = String((err as Error).message);
+      if (isDefinitive(err) || refund.attempts >= MAX_CLOSE_ATTEMPTS) {
+        refund.status = "failed";
+        this.emit(tabId, "refund_failed", { id: refund.id, error: refund.error });
+      } else {
+        tab.retryAt = this.now() + backoff(refund.attempts);
+        this.emit(tabId, "refund_retry_pending", { id: refund.id, error: refund.error });
+      }
+    }
+    this.persist();
   }
 
   /** Close expired tabs, resume interrupted closes, retry stuck captures, refresh PENDING captures. Call periodically. */
@@ -730,6 +809,11 @@ export class TabService {
           await this.maybeCapture(tabId);
         } else if (tab.captures.some((c) => c.paypalStatus === "PENDING")) {
           await this.withLock(tabId, () => this.reconcile(tab));
+        }
+        if (tab.status !== "closing" && (tab.retryAt ?? 0) <= now && tab.refunds?.some((r) => r.status === "pending")) {
+          await this.withLock(tabId, async () => {
+            for (const r of tab.refunds ?? []) await this.runRefund(tab, r);
+          });
         }
       } catch (err) {
         console.error("sweep", tabId, err);

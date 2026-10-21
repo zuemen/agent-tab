@@ -134,6 +134,8 @@ describe("PayPal statuses are the source of truth", () => {
     v = view(tabId);
     expect(v.captures).toHaveLength(1);
     expect(v.captures[0]).toMatchObject({ status: "completed", requestId: `${tabId}-capture-1` });
+    // Both attempts reached PayPal with the same PayPal-Request-Id.
+    expect(rail.requestIds.filter((r) => r.kind === "capture").map((r) => r.requestId)).toEqual([`${tabId}-capture-1`, `${tabId}-capture-1`]);
   });
 
   it("if PayPal took the money but answered with an error, reconciliation adopts the capture instead of capturing again", async () => {
@@ -290,7 +292,8 @@ describe("closing survives temporary failures", () => {
     v = view(tabId);
     expect(v.status).toBe("closed");
     expect(rail.payouts).toHaveLength(1);
-    expect(rail.payouts[0]!.batchId).toBe(`${tabId}-payout`);
+    // The failed attempt and the retry used the same batch id, so PayPal cannot pay twice.
+    expect(rail.requestIds.filter((r) => r.kind === "payout").map((r) => r.requestId)).toEqual([`${tabId}-payout`, `${tabId}-payout`]);
   });
 });
 
@@ -315,5 +318,122 @@ describe("refunds", () => {
     const { tabId } = await openTab({ captureThresholdUsd: "1.00" });
     pay(tabId, "news", 100_000);
     expect(() => svc.proposeRefund(tabId, 1, "x")).toThrow(/not been captured/);
+  });
+});
+
+describe("refunds that are in flight when the tab closes", () => {
+  it("F4: sellers are paid only after a confirmed refund has gone through, and it comes out of their payout", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 100_000);
+    pay(tabId, "data", 100_000);
+    await settleCaptures();
+    const proposal = svc.proposeRefund(tabId, 1, "wrong article");
+    rail.failNext.refund = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("pending");
+    rail.failNext.refund = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    let v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closing");
+    expect(v.payout).toBeUndefined();
+    later();
+    await svc.sweep();
+    v = view(tabId);
+    expect(v.status).toBe("closed");
+    expect(v.refunds[0]).toMatchObject({ status: "completed", afterPayout: false });
+    expect(v.payout.lines).toEqual([{ seller: "data", amountCents: 9, amount: "0.09" }]);
+  });
+
+  it("F9: a retried refund whose first answer was lost is found on the order, not sent again", async () => {
+    const { tabId } = await openTab();
+    pay(tabId, "news", 100_000);
+    await settleCaptures();
+    const proposal = svc.proposeRefund(tabId, 1, "x");
+    rail.ghostNextRefund = new PayPalError("lost answer", 503, "SERVICE_UNAVAILABLE");
+    expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("pending");
+    rail.forgetRequestIds(); // PayPal no longer remembers the request id
+    expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("completed");
+    expect(rail.refunds).toHaveLength(1);
+    expect(rail.requestIds.filter((r) => r.kind === "refund")).toHaveLength(1); // the retry never reached the refund endpoint
+  });
+});
+
+describe("F8: refunds never exceed what the call cost", () => {
+  it("rounds down to whole cents and refuses calls under one cent", async () => {
+    const { tabId } = await openTab({ captureThresholdUsd: "0.10" });
+    pay(tabId, "news", 4_000); // $0.004
+    pay(tabId, "news", 15_000); // $0.015
+    pay(tabId, "data", 100_000);
+    await settleCaptures();
+    expect(() => svc.proposeRefund(tabId, 1, "x")).toThrow(/less than one cent/);
+    expect(svc.proposeRefund(tabId, 2, "x").amountCents).toBe(1);
+  });
+});
+
+describe("F5: the owner key in the review link stops working once the owner approves in PayPal", () => {
+  async function throughPayPal(withCookie: boolean) {
+    const app = createApp(svc);
+    const { tabId, ownerKey } = svc.requestTab({ agentPublicKey: keys.publicKey, purpose: "p" });
+    const terms = await app.request(`/api/tabs/${tabId}/terms`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-agenttab-owner": ownerKey },
+      body: JSON.stringify({ budgetUsd: "1.00", perCallCapUsd: "0.10", captureThresholdUsd: "0.10", sellers: ["news"], expiresInHours: 1 }),
+    });
+    const cookie = terms.headers.get("set-cookie")!.split(";")[0]!;
+    expect(terms.headers.get("set-cookie")).toMatch(/HttpOnly/i);
+    const { approveUrl } = (await terms.json()) as { approveUrl: string };
+    const back = new URL(rail.approve(new URL(approveUrl).searchParams.get("token")!));
+    const res = await app.request(back.pathname + back.search, withCookie ? { headers: { cookie } } : {});
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location")!;
+    const close = (key: string) => app.request(`/api/tabs/${tabId}/close`, { method: "POST", headers: { "content-type": "application/json", "x-agenttab-owner": key }, body: "{}" });
+    const replay = () => app.request(back.pathname + back.search, { headers: { cookie } });
+    return { tabId, ownerKey, location, close, replay };
+  }
+
+  it("the browser that went to PayPal gets a new key; the old one is refused", async () => {
+    const { ownerKey, location, close, replay } = await throughPayPal(true);
+    const fresh = /#owner=([A-Za-z0-9_-]+)$/.exec(location)?.[1];
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe(ownerKey);
+    expect((await close(ownerKey)).status).toBe(403);
+    expect((await close(fresh!)).status).toBe(200);
+    // Replaying the same redirect, even with the cookie, hands out nothing more.
+    const again = await replay();
+    expect(again.status).toBe(302);
+    expect(again.headers.get("location")).toMatch(/approved=1$/);
+  });
+
+  it("a redirect without the browser's cookie opens the tab but hands out no key", async () => {
+    const { ownerKey, location, close } = await throughPayPal(false);
+    expect(location).not.toMatch(/#owner=/);
+    expect((await close(ownerKey)).status).toBe(200);
+  });
+});
+
+describe("F6 and F7: robustness of the HTTP API", () => {
+  it("F6: a tab saved before owner keys existed is readable and owned by nobody", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const file = join(mkdtempSync(join(tmpdir(), "agenttab-")), "tabs.json");
+    const request = { tabId: "tab_legacy", agentPublicKey: keys.publicKey, purpose: "", agentName: "", suggested: {}, createdAt: 0 };
+    writeFileSync(file, JSON.stringify({ network: "paypal:simulated", tabs: [{ request }] }));
+    const legacy = new TabService(rail, { publicUrl: "http://x", network: "paypal:simulated", platformFeeBps: 1000, sellers: SELLERS, dataFile: file });
+    const res = await createApp(legacy).request("/api/tabs/tab_legacy", { headers: { "x-agenttab-owner": "anything" } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ owner: false });
+  });
+
+  it("F7: without a trusted proxy, a client cannot dodge the rate limit by forging X-Forwarded-For", async () => {
+    const ask = (app: ReturnType<typeof createApp>, xff: string) =>
+      app.request("/api/tab-requests", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": xff }, body: JSON.stringify({ agentPublicKey: keys.publicKey, purpose: "p" }) });
+    const direct = createApp(svc, { tabRequestsPerHour: 2 });
+    expect((await ask(direct, "1.1.1.1")).status).toBe(201);
+    expect((await ask(direct, "2.2.2.2")).status).toBe(201);
+    expect((await ask(direct, "3.3.3.3")).status).toBe(429);
+    // Behind one proxy, the last entry is the address the proxy saw.
+    const proxied = createApp(svc, { tabRequestsPerHour: 1, trustProxyHops: 1 });
+    expect((await ask(proxied, "9.9.9.9, 1.1.1.1")).status).toBe(201);
+    expect((await ask(proxied, "8.8.8.8, 1.1.1.1")).status).toBe(429);
+    expect((await ask(proxied, "2.2.2.2")).status).toBe(201);
   });
 });

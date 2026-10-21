@@ -8,6 +8,7 @@ import {
   type CreateAuthorizeOrderInput,
   type CreatedOrder,
   type OrderCapture,
+  type OrderRefund,
   type PayoutInput,
   type PayoutResult,
   type PayPalRail,
@@ -47,15 +48,20 @@ export class SimulatedRail implements PayPalRail {
   readonly authorizations = new Map<string, SimAuthorization>();
   readonly payouts: PayoutInput[] = [];
   readonly captures: (OrderCapture & { authorizationId: string; refundedCents: number })[] = [];
+  readonly refunds: (OrderRefund & { captureId: string })[] = [];
   /** Tests: make the next capture report this status instead of COMPLETED. */
   nextCaptureStatus?: string;
   /** Tests: make the next authorization report this status instead of CREATED. */
   nextAuthorizationStatus?: string;
   /** Tests: apply the next capture, then answer with this error (PayPal took the money but we never heard). */
   ghostNextCapture?: PayPalError;
+  /** Every money-moving request id received, including attempts that failed. */
+  readonly requestIds: { kind: "capture" | "void" | "payout" | "refund"; requestId: string }[] = [];
   private readonly replies = new Map<string, unknown>();
   /** Inject failures in tests: return an error to throw for the next call of that kind. */
-  failNext: Partial<Record<"capture" | "authorize" | "void" | "payout" | "lookup", PayPalError>> = {};
+  failNext: Partial<Record<"capture" | "authorize" | "void" | "payout" | "lookup" | "refund", PayPalError>> = {};
+  /** Tests: apply the next refund, then answer with this error. */
+  ghostNextRefund?: PayPalError;
 
   constructor(
     private readonly approveBaseUrl: string,
@@ -112,6 +118,7 @@ export class SimulatedRail implements PayPalRail {
   }
 
   async captureAuthorization(input: CaptureInput): Promise<CaptureResult> {
+    this.requestIds.push({ kind: "capture", requestId: input.requestId });
     this.takeFailure("capture");
     const result = this.once(input.requestId, () => {
       const auth = this.authorizations.get(input.authorizationId);
@@ -140,6 +147,7 @@ export class SimulatedRail implements PayPalRail {
   }
 
   async voidAuthorization(authorizationId: string, requestId: string): Promise<void> {
+    this.requestIds.push({ kind: "void", requestId });
     this.takeFailure("void");
     this.once(requestId, () => {
       const auth = this.authorizations.get(authorizationId);
@@ -151,21 +159,47 @@ export class SimulatedRail implements PayPalRail {
 
   async getOrderCaptures(orderId: string): Promise<OrderCapture[]> {
     this.takeFailure("lookup");
+    return this.getOrderCapturesUnchecked(orderId);
+  }
+
+  private async getOrderCapturesUnchecked(orderId: string): Promise<OrderCapture[]> {
     const authIds = new Set([...this.authorizations.values()].filter((a) => a.orderId === orderId).map((a) => a.id));
     return this.captures.filter((c) => authIds.has(c.authorizationId)).map(({ captureId, status, amountCents, invoiceId }) => ({ captureId, status, amountCents, ...(invoiceId ? { invoiceId } : {}) }));
   }
 
   async refundCapture(input: RefundInput): Promise<RefundResult> {
-    return this.once(input.requestId, () => {
+    this.requestIds.push({ kind: "refund", requestId: input.requestId });
+    this.takeFailure("refund");
+    const result = this.once(input.requestId, () => {
       const cap = this.captures.find((c) => c.captureId === input.captureId);
       if (!cap) throw new PayPalError("capture not found", 404, "RESOURCE_NOT_FOUND");
       if (cap.refundedCents + input.amountCents > cap.amountCents) throw new PayPalError("refund exceeds capture", 422, "REFUND_AMOUNT_EXCEEDED");
       cap.refundedCents += input.amountCents;
-      return { refundId: id("REFUND"), status: "COMPLETED" };
+      const refund = { refundId: id("REFUND"), status: "COMPLETED", amountCents: input.amountCents, captureId: cap.captureId, ...(input.invoiceId ? { invoiceId: input.invoiceId } : {}) };
+      this.refunds.push(refund);
+      return { refundId: refund.refundId, status: refund.status };
     });
+    const ghost = this.ghostNextRefund;
+    if (ghost) {
+      delete this.ghostNextRefund;
+      throw ghost;
+    }
+    return result;
+  }
+
+  /** Tests: forget cached replies, as PayPal eventually does with old request ids. */
+  forgetRequestIds(): void {
+    this.replies.clear();
+  }
+
+  async getOrderRefunds(orderId: string): Promise<OrderRefund[]> {
+    this.takeFailure("lookup");
+    const captureIds = new Set((await this.getOrderCapturesUnchecked(orderId)).map((c) => c.captureId));
+    return this.refunds.filter((r) => captureIds.has(r.captureId)).map(({ captureId: _c, ...r }) => r);
   }
 
   async createPayouts(input: PayoutInput): Promise<PayoutResult> {
+    this.requestIds.push({ kind: "payout", requestId: input.batchId });
     this.takeFailure("payout");
     return this.once(input.batchId, () => {
       this.payouts.push(input);

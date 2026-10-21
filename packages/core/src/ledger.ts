@@ -54,6 +54,8 @@ export interface RefundRecord {
   reason: string;
   status: "proposed" | "pending" | "completed" | "failed";
   createdAt: number;
+  /** Times the refund was sent to PayPal; bounded. */
+  attempts?: number;
   paypalRefundId?: string;
   /** Refunded after sellers were paid out: the platform absorbed it. */
   afterPayout?: boolean;
@@ -390,8 +392,10 @@ export function computePayouts(tab: TabState, platformFeeBps: number): PayoutRec
 }
 
 /**
- * Work out a refund for one paid call: its amount (rounded half-up to cents,
- * at least 1 cent) from a completed capture that still has that much left.
+ * Work out a refund for one paid call: its amount in whole cents, rounded down
+ * so the buyer never gets back more than the call cost, from a completed
+ * capture that still has that much left. Calls under one cent cannot be
+ * refunded through PayPal.
  */
 export function planRefund(tab: TabState, entrySeq: number): Result<{ seller: string; amountCents: number; paypalCaptureId: string }> {
   const entry = tab.entries.find((e) => e.seq === entrySeq);
@@ -399,7 +403,8 @@ export function planRefund(tab: TabState, entrySeq: number): Result<{ seller: st
   if ((tab.refunds ?? []).some((r) => r.entrySeq === entrySeq && r.status !== "failed")) {
     return reject("REPLAYED_NONCE", `call #${entrySeq} was already refunded or has a refund pending`);
   }
-  const amountCents = Math.max(1, Math.floor((entry.amountMicros + MICROS_PER_CENT / 2) / MICROS_PER_CENT));
+  const amountCents = Math.floor(entry.amountMicros / MICROS_PER_CENT);
+  if (amountCents < 1) return reject("INVALID_AMOUNT", `call #${entrySeq} cost less than one cent, which PayPal cannot refund`);
   const refundedFrom = new Map<string, number>();
   for (const r of tab.refunds ?? []) {
     if (r.status !== "failed") refundedFrom.set(r.paypalCaptureId, (refundedFrom.get(r.paypalCaptureId) ?? 0) + r.amountCents);

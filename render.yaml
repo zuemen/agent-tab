@@ -24,3 +24,5 @@ services:
         value: "20"
       - key: PLATFORM_FEE_BPS
         value: "1000"
+      - key: TRUST_PROXY_HOPS
+        value: "1" # Render's proxy appends the client address to X-Forwarded-For

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { PayPalError, SimulatedRail } from "@agent-tab/paypal";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
@@ -11,6 +12,8 @@ export interface AppOptions {
   webHtml?: () => string;
   /** Max tab requests per client IP per hour (default 30). */
   tabRequestsPerHour?: number;
+  /** Reverse proxies in front of this server that append to X-Forwarded-For (default 0: use the socket address). */
+  trustProxyHops?: number;
 }
 
 export const OWNER_HEADER = "x-agenttab-owner";
@@ -21,13 +24,20 @@ function bearer(header: string | undefined): string | undefined {
 }
 
 /**
- * Client IP for rate limiting. Behind one reverse proxy (e.g. Render) the proxy
- * appends the real address last; earlier X-Forwarded-For entries are client-supplied.
+ * Client IP for rate limiting. With no trusted proxy, X-Forwarded-For is
+ * whatever the client sent, so only the socket address counts. Behind
+ * `trustProxyHops` proxies (Render: 1), each appends one entry, so the real
+ * client is that many entries from the end; anything earlier is client-supplied.
  */
-export function clientIp(c: Context): string {
+export function clientIp(c: Context, trustProxyHops = 0): string {
+  const socket = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress ?? "local";
+  if (trustProxyHops <= 0) return socket;
   const parts = (c.req.header("x-forwarded-for") ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-  return parts.at(-1) ?? "local";
+  return parts.at(-trustProxyHops) ?? socket;
 }
+
+/** Cookie that ties PayPal's redirect back to the browser that went to PayPal. */
+const bindingCookie = (tabId: string) => `agenttab_bind_${tabId}`;
 
 /** Fixed-window limiter keyed by an arbitrary string. */
 export function rateLimiter(limit: number, windowMs: number) {
@@ -106,7 +116,7 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
 
   /** An agent asks for a tab. The response's reviewUrl (with the owner key in its fragment) is for the human. */
   app.post("/api/tab-requests", async (c) => {
-    if (!tabLimiter(clientIp(c))) return c.json({ error: "too many tab requests; try again later" }, 429);
+    if (!tabLimiter(clientIp(c, opts.trustProxyHops))) return c.json({ error: "too many tab requests; try again later" }, 429);
     const body = await json<{ agentPublicKey: string; purpose: string; agentName?: string; suggested?: Partial<TabTerms> }>(c);
     const { tabId, reviewUrl } = service.requestTab(body);
     return c.json({ tabId, reviewUrl }, 201);
@@ -119,7 +129,15 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
 
   app.post("/api/tabs/:id/terms", async (c) => {
     const id = requireOwner(c);
-    return c.json(await service.approveTerms(id, await json<TabTerms>(c)));
+    const { approveUrl, binding } = await service.approveTerms(id, await json<TabTerms>(c));
+    setCookie(c, bindingCookie(id), binding, {
+      httpOnly: true,
+      sameSite: "Lax", // sent on PayPal's top-level redirect back to us
+      path: "/paypal",
+      maxAge: 3 * 3600,
+      secure: service.config.publicUrl.startsWith("https:"),
+    });
+    return c.json({ approveUrl });
   });
   app.post("/api/tabs/:id/close", async (c) => c.json(await service.close(requireOwner(c), "closed_by_user")));
   app.post("/api/tabs/:id/revoke", async (c) => c.json(await service.close(requireOwner(c), "revoked")));
@@ -188,8 +206,10 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
     const tabId = service.findByOrder(orderId)?.request.tabId;
     if (!tabId) return c.redirect("/");
     try {
-      await service.onApproved(orderId);
-      return c.redirect(`/tab/${tabId}?approved=1`);
+      const { ownerKey } = await service.onApproved(orderId, getCookie(c, bindingCookie(tabId)));
+      deleteCookie(c, bindingCookie(tabId), { path: "/paypal" });
+      // The fresh owner key travels in the fragment, which the browser keeps across the redirect and never sends to a server.
+      return c.redirect(`/tab/${tabId}?approved=1${ownerKey ? `#owner=${ownerKey}` : ""}`);
     } catch (err) {
       console.error("authorize", tabId, err);
       const msg = err instanceof PayPalError ? `PayPal could not authorize the payment (${err.code}).` : "Could not open the tab.";

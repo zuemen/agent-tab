@@ -125,13 +125,16 @@ describe("all-in-one demo", () => {
       { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t2", name: "tab_status", input: {} }] },
       { stop_reason: "end_turn", content: [{ type: "text", text: "Buy it. Purchases: Harbor Gazette article $0.05." }] },
     ];
-    const fake = { messages: { create: async (params: { tools: { name: string }[]; messages: unknown[] }) => { seen.push(params); return replies.shift(); } } };
+    const fake = { beta: { messages: { create: async (params: { tools: { name: string }[]; messages: unknown[] }) => { seen.push(params); return replies.shift(); } } } };
     const events: { type: string }[] = [];
     const answer = await runClaudeAgent({ task: "t", sellers: [conn], tabStatus: async () => demo.service.view(req.tabId), onEvent: (e) => events.push(e), anthropic: fake as never });
     expect(answer).toMatch(/Buy it/);
-    const first = seen[0] as { tools: { name: string }[]; cache_control?: unknown; thinking?: unknown };
+    const first = seen[0] as { model: string; tools: { name: string }[]; cache_control?: unknown; fallbacks?: unknown; betas?: string[]; output_config?: unknown };
     expect(first.tools.map((t) => t.name)).toEqual(["harbor-gazette__read_article", "harbor-gazette__search_headlines", "tab_status"]);
     expect(first.cache_control).toEqual({ type: "ephemeral" });
+    expect(first.model).toBe("claude-sonnet-5-5");
+    expect(first.output_config).toEqual({ effort: "medium" });
+    expect(first).toMatchObject({ fallbacks: "default", betas: ["server-side-fallback-2026-07-01"] });
     expect(events.map((e) => e.type)).toEqual(["tool_call", "payment", "tool_result", "text", "done"]);
     const v = await fetch(`${base}/api/tabs/${req.tabId}`, { headers: H(req.tabId) }).then((r) => r.json());
     expect(v.totals.spent).toBe("0.05");

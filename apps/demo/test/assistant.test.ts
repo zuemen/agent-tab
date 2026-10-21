@@ -27,14 +27,14 @@ function scriptedModel(turns: { name: string; input: Record<string, unknown> }[]
   return {
     seen,
     client: {
-      messages: {
+      beta: { messages: {
         create: async (params: { tools: { name: string }[] }) => {
           seen.push(params);
           const t = turns[i++];
           if (!t) return { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] };
           return { stop_reason: "tool_use", content: [{ type: "tool_use", id: `u${i}`, name: t.name, input: t.input }] };
         },
-      },
+      } },
     },
   };
 }
@@ -82,5 +82,10 @@ describe("tab assistant", () => {
     const answer = await askAssistant({ question: "what did I buy?", facts, proposeRefund: () => ({}), anthropic: model.client as never });
     expect(answer).toBe("done");
     expect(model.seen[0]!.tools.map((t) => t.name)).toEqual(["tab_ledger", "propose_refund"]);
+  });
+  it("answers plainly instead of returning an empty reply when the model declines", async () => {
+    const refusing = { beta: { messages: { create: async () => ({ stop_reason: "refusal", content: [] }) } } };
+    const answer = await askAssistant({ question: "q", facts, proposeRefund: () => ({}), anthropic: refusing as never });
+    expect(answer).toMatch(/can't help/);
   });
 });

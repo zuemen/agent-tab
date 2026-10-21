@@ -3,7 +3,18 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createx402MCPClient, type x402MCPClient } from "@x402/mcp";
 import { PayPalTabClientScheme, describePrice, type PayPalNetwork, type TabSigner } from "@agent-tab/x402-paypal";
 
-export const DEFAULT_MODEL = process.env.AGENT_MODEL ?? "claude-opus-5-5";
+export const DEFAULT_MODEL = process.env.AGENT_MODEL ?? "claude-sonnet-5-5";
+
+/**
+ * Sent with every Claude request: if the model declines on policy grounds, the
+ * API re-runs the request on a fallback model it picks by refusal category.
+ */
+export const REFUSAL_FALLBACK: Pick<Anthropic.Beta.Messages.MessageCreateParamsNonStreaming, "betas" | "fallbacks"> = {
+  betas: ["server-side-fallback-2026-07-01"],
+  fallbacks: "default",
+};
+
+export const REFUSED_ANSWER = "Claude declined to continue this run, so nothing more was bought. The tab is unaffected.";
 
 export type AgentEvent =
   | { type: "thinking"; text: string }
@@ -148,15 +159,18 @@ export async function runClaudeAgent(opts: RunOptions): Promise<string> {
   }
   tools.push(TAB_STATUS_TOOL);
 
-  const messages: Anthropic.MessageParam[] = [{ role: "user", content: opts.task }];
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: opts.task }];
   for (let turn = 0; turn < (opts.maxTurns ?? 12); turn++) {
-    const response = await anthropic.messages.create({
+    const response = await anthropic.beta.messages.create({
       model: opts.model ?? DEFAULT_MODEL,
       max_tokens: 8000,
       system: SYSTEM_PROMPT,
       tools,
       thinking: { type: "adaptive" },
+      // Multi-step tool use: medium keeps runs short without skimping on judgment.
+      output_config: { effort: "medium" },
       cache_control: { type: "ephemeral" },
+      ...REFUSAL_FALLBACK,
       messages,
     });
     messages.push({ role: "assistant", content: response.content });
@@ -164,17 +178,21 @@ export async function runClaudeAgent(opts: RunOptions): Promise<string> {
       if (block.type === "text" && block.text.trim()) opts.onEvent({ type: "text", text: block.text });
     }
     if (response.stop_reason === "pause_turn") continue;
-    const uses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+    if (response.stop_reason === "refusal") {
+      opts.onEvent({ type: "done", answer: REFUSED_ANSWER, mode: "claude" });
+      return REFUSED_ANSWER;
+    }
+    const uses = response.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (response.stop_reason !== "tool_use" || !uses.length) {
       const answer = response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
         .map((b) => b.text)
         .join("\n")
         .trim();
       opts.onEvent({ type: "done", answer, mode: "claude" });
       return answer;
     }
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
     for (const use of uses) {
       if (use.name === TAB_STATUS_TOOL.name) {
         results.push({ type: "tool_result", tool_use_id: use.id, content: JSON.stringify(await opts.tabStatus()) });

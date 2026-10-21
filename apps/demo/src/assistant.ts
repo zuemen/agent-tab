@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { PayPalAgentToolkit } from "@paypal/agent-toolkit/mcp";
-import { DEFAULT_MODEL } from "@agent-tab/agent";
+import { DEFAULT_MODEL, REFUSAL_FALLBACK } from "@agent-tab/agent";
 
 /**
  * Tab assistant: answers the tab owner's questions about charges and proposes
@@ -77,25 +77,29 @@ export async function askAssistant(opts: {
       tools.push({ name: t.name, description: `[PayPal Agent Toolkit] ${t.description ?? ""}`.slice(0, 1024), input_schema: t.inputSchema as Anthropic.Tool.InputSchema });
     }
   }
-  const messages: Anthropic.MessageParam[] = [
+  const messages: Anthropic.Beta.BetaMessageParam[] = [
     { role: "user", content: `Tab ${opts.facts.tabId}${opts.facts.orderId ? `, PayPal order ${opts.facts.orderId}` : ""}.\n\n${opts.question}` },
   ];
   for (let turn = 0; turn < 6; turn++) {
-    const res = await anthropic.messages.create({
+    const res = await anthropic.beta.messages.create({
       model: opts.model ?? DEFAULT_MODEL,
       max_tokens: 4000,
       system: SYSTEM,
       tools,
       thinking: { type: "adaptive" },
+      // Short answers about one tab: low effort is enough and keeps the reply quick.
+      output_config: { effort: "low" },
       cache_control: { type: "ephemeral" },
+      ...REFUSAL_FALLBACK,
       messages,
     });
     messages.push({ role: "assistant", content: res.content });
-    const uses = res.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+    if (res.stop_reason === "refusal") return "I can't help with that one. Ask me about this tab's charges, captures or refunds.";
+    const uses = res.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (res.stop_reason !== "tool_use" || !uses.length) {
-      return res.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("\n").trim();
+      return res.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text").map((b) => b.text).join("\n").trim();
     }
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
     for (const use of uses) {
       const input = (use.input ?? {}) as Record<string, unknown>;
       const reply = (content: string, isError = false) => results.push({ type: "tool_result", tool_use_id: use.id, content, ...(isError ? { is_error: true } : {}) });

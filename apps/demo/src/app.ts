@@ -126,7 +126,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
       agentPublicKey: keys.publicKey,
       agentName: "Harbor Bean research agent",
       purpose: DEMO_TASK,
-      suggested: { budgetUsd: "3.00", perCallCapUsd: "0.50", captureThresholdUsd: "0.50", sellers: DEMO_SELLERS, expiresInHours: 24 },
+      suggested: { budgetUsd: "5.00", perCallCapUsd: "0.50", captureThresholdUsd: "0.50", sellers: DEMO_SELLERS, expiresInHours: 24 },
     });
     sessions.set(tabId, { keys, runs: 0, questions: 0, running: false, log: [] });
     saveKeys();

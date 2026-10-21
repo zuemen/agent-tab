@@ -523,6 +523,9 @@ export class TabService {
   private deferCapture(tab: TabState, rec: CaptureRecord, error: string): void {
     rec.attempts = (rec.attempts ?? 0) + 1;
     rec.nextAttemptAt = this.now() + backoff(rec.attempts);
+    // Never resent blindly, so it may wait a long time: past the usual limit, flag it for a person.
+    if (rec.attempts >= MAX_CLOSE_ATTEMPTS) error = `${error}. Still unresolved after ${rec.attempts} attempts: check this capture in PayPal`;
+    rec.error = error;
     this.persist();
     this.emit(tab.mandate.tabId, "capture_retry_pending", { id: rec.id, error });
   }
@@ -841,6 +844,11 @@ export class TabService {
       const tabId = tab.mandate.tabId;
       try {
         const expiry = Math.min(tab.mandate.expiresAt, tab.authorizationExpiresAt ?? Infinity);
+        // Never approved at PayPal (or approved but never finished in the owner's browser) before its expiry: nothing was authorized.
+        if (tab.status === "awaiting_approval" && now >= tab.mandate.expiresAt) {
+          await this.close(tabId, "expired");
+          continue;
+        }
         if ((tab.status === "active" && now >= expiry) || tab.status === "closing") {
           await this.close(tabId, "expired");
         } else if (tab.status === "active" && tab.captures.some((c) => c.status === "pending")) {

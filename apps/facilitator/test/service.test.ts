@@ -540,3 +540,30 @@ describe("second review: money paths", () => {
     expect(v.payout.lines).toEqual([{ seller: "data", amountCents: 9, amount: "0.09" }]);
   });
 });
+
+describe("third review: nothing waits forever", () => {
+  it("a tab never finished in the owner's browser is cancelled at its expiry", async () => {
+    const req = svc.requestTab({ agentPublicKey: keys.publicKey, purpose: "p" });
+    const { approveUrl } = await svc.approveTerms(req.tabId, { budgetUsd: "1.00", perCallCapUsd: "0.10", captureThresholdUsd: "0.10", sellers: ["news"], expiresInHours: 1 });
+    rail.approve(new URL(approveUrl).searchParams.get("token")!);
+    later(); // past the 1-hour expiry
+    await svc.sweep();
+    expect(view(req.tabId).status).toBe("closed");
+  });
+
+  it("a capture stuck behind unreadable PayPal records is flagged for a person, still never resent", async () => {
+    const { tabId } = await openTab();
+    rail.ghostNextCapture = new PayPalError("lost answer", 422, "UNPROCESSABLE_ENTITY");
+    rail.lookupsDown = new PayPalError("down", 503, "SERVICE_UNAVAILABLE");
+    pay(tabId, "news", 300_000);
+    await settleCaptures();
+    for (let i = 0; i < 9; i++) {
+      later();
+      await svc.sweep();
+    }
+    const cap = view(tabId).captures[0];
+    expect(cap.status).toBe("pending");
+    expect(cap.error).toMatch(/check this capture in PayPal/);
+    expect(rail.requestIds.filter((r) => r.kind === "capture")).toHaveLength(1);
+  });
+});

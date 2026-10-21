@@ -106,7 +106,7 @@ Each demo seller is a Streamable HTTP MCP server at `http://localhost:4020/mcp/<
 ## Tests
 
 ```bash
-npm test          # 77 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
+npm test          # 79 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
 npm run typecheck
 ```
 
@@ -139,7 +139,7 @@ We did not find a public implementation that combines a single PayPal authorizat
 - **Seller trust.** A seller can settle a charge and return a poor answer. The owner can refund through the tab assistant; disputes beyond that follow PayPal's normal process.
 - **Single process, JSON persistence.** Fine for a demo; a real deployment needs a database.
 - **Tabs longer than 3 days** would need PayPal reauthorization, which is not implemented.
-- **Owner identity.** The review link is a bearer link the requesting agent also sees, so before approval AgentTab cannot fully tell the owner from the agent. The checks are: the terms are shown on PayPal's own approval page, only the browser that submitted the terms can open the tab, and the owner's page warns when the terms came from somewhere else. Production would authenticate the owner directly (for example with Log in with PayPal). Approving at PayPal on another device works; the owner then presses Finish in the browser that submitted the terms.
+- **Owner identity.** The review link is a bearer link the requesting agent also sees, so before approval AgentTab cannot fully tell the owner from the agent. The checks are: the terms are shown on PayPal's own approval page, only the browser that submitted the terms can open the tab, and the owner's page warns when the terms came from somewhere else. Production would authenticate the owner directly (for example with Log in with PayPal). Approving at PayPal on another device works; the owner then presses Finish in the browser that submitted the terms. An agent that submits the terms itself and forwards the PayPal link straight to the owner can still end up holding the tab: the owner's PayPal return then says the terms came from elsewhere and not to continue, but a link the agent has seen cannot fully prove who the owner is. Tabs never finished in the owner's browser are cancelled at their expiry.
 - **Refunds below one cent.** PayPal moves whole cents, so a call that cost less than one cent cannot be refunded.
 - **Resource binding.** The item name in a charge comes from the seller's payment requirements; the per-call cap and budget are what bound a dishonest seller.
 

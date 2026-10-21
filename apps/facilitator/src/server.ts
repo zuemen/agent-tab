@@ -136,7 +136,7 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
       httpOnly: true,
       sameSite: "Lax", // sent on PayPal's top-level redirect back to us
       path: "/",
-      maxAge: 3 * 3600,
+      maxAge: 60 * 3600, // as long as a tab can live (MAX_TAB_LIFETIME_MS)
       secure: service.config.publicUrl.startsWith("https:"),
     });
     return c.json({ approveUrl });

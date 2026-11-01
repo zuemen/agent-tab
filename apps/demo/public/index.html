@@ -215,6 +215,7 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 .feed li.refused .what { color: var(--red); }
 .feed li .amt { font: 500 13.5px var(--mono); color: var(--ink-2); }
 .feed li.pay .amt { color: var(--green); }
+.answer code { font-family: inherit; font-size: 0.95em; padding: 0 3px; border-radius: 3px; background: var(--rule); }
 .answer { margin: 0; padding: 16px 20px; border-top: 1px solid var(--rule); white-space: pre-wrap; font-size: 15px; line-height: 1.55; background: var(--sheet-2); }
 .stack { display: grid; gap: 12px; }
 .stack:empty { display: none; }
@@ -295,6 +296,16 @@ select.plain { height: 54px; }
 "use strict";
 const $app = document.getElementById("app");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Model answers use light Markdown: escape first, then render bold, inline code, headings, bullets and rules.
+const md = (s) => esc(s)
+  .replace(/^\s*([-*_])\1{2,}\s*$/gm, "")
+  .replace(/^#{1,6}\s+(.+)$/gm, "<b>$1</b>")
+  .replace(/^(\s*)[*-]\s+/gm, "$1• ")
+  .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+  .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)(?<!\s)\*(?=[^*\w]|$)/g, "$1<i>$2</i>")
+  .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+  .replace(/\n{3,}/g, "\n\n")
+  .trim();
 // Server amounts are exact decimal strings; keep sub-cent digits when present.
 const money = (v) => {
   const dec = (String(v ?? "").split(".")[1] || "").replace(/0+$/, "").length;
@@ -559,13 +570,13 @@ function renderDashboard(q) {
         ${INFO.agentMode === "ai" ? `<form id="ask" class="askform"><input id="q" class="plain" maxlength="500" placeholder="e.g. Which charge was least worth it? Propose a refund." style="flex:1" value="${esc(DRAFT)}"><button class="cta" id="askbtn" ${ASKING ? "disabled" : ""}>${ASKING ? "Thinking…" : "Ask"}</button></form>
         ${ASK ? `<p class="answer"><b>Q:</b> ${esc(ASK.q)}
 
-${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and proposes refunds for you to confirm. It needs a model API key on the server.</div>`}
+${md(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and proposes refunds for you to confirm. It needs a model API key on the server.</div>`}
       </section>
     </div>
     <div class="col side">
       <section class="slip panel"><div class="panel-head"><h3>Agent activity</h3><span class="count">${INFO.agentMode === "ai" ? esc(INFO.agentModel) : "scripted"}</span></div>
         ${FEED.length ? `<ul class="feed" id="feed">${FEED.map(feedItem).join("")}</ul>` : `<div class="empty">The agent's purchases and refusals appear here as they happen.</div>`}
-        ${ANSWER ? `<p class="answer">${esc(ANSWER)}</p>` : ""}
+        ${ANSWER ? `<p class="answer">${md(ANSWER)}</p>` : ""}
       </section>
     </div>
   </div></div>`;
@@ -638,7 +649,7 @@ function feedItem(ev) {
     case "payment": return row("pay", "✓", `Paid ${esc(ev.seller)} for ${esc(ev.tool)}`, esc(ev.amount));
     case "payment_refused": return row("refused", "✕", `<span title="${esc(ev.reason)}">Refused: ${esc(ev.seller)} · ${esc(ev.tool)} — ${esc(plainReason(ev.reason))}</span>`);
     case "tool_error": return row("", "!", `Tool error (not charged): ${esc(ev.seller)} · ${esc(ev.tool)}`);
-    case "text": return row("", "“", esc(ev.text.length > 220 ? ev.text.slice(0, 220) + "…" : ev.text));
+    case "text": return row("", "“", md(ev.text.length > 220 ? ev.text.slice(0, 220) + "…" : ev.text));
     case "done": return row("", "■", "Agent finished");
     default: return "";
   }

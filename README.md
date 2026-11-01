@@ -6,6 +6,18 @@ Your agent asks for a budget. You approve it once with PayPal. Every paid tool c
 
 > Built for the PayPal AI Hackathon (2026). Repository started 2026-10-12. All payment flows run against the **PayPal sandbox** (test money).
 
+## Try it in two minutes (judges)
+
+**Live demo: https://agent-tab.onrender.com** (PayPal sandbox, test money only)
+
+1. **Start the demo** → review the agent's spending request (budget, per-call cap, sellers, expiry) → **Authorize $5.00 with PayPal**.
+2. On PayPal's sandbox page, choose **Log in** (not "pay with card") and use the sandbox buyer account from the Devpost *testing instructions*, or any sandbox *personal* account of your own from developer.paypal.com.
+3. Back on the tab: **Run the agent** (about 10 seconds). Watch it buy from three sellers while the ledger fills and a capture from the PayPal hold appears.
+4. In **Ask about this tab**, ask *"Which charge was least worth it? Propose a refund."* → press **Confirm refund**.
+5. **Close tab**: the rest of the hold is released and each seller is paid out through PayPal Payouts.
+
+The hosted model is Gemini on Google's free tier. If its daily quota runs out, the page says so and the agent follows a labeled scripted plan; the PayPal flow is unchanged. To run it yourself, see [Run it](#run-it).
+
 ---
 
 ## The problem

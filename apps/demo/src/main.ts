@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { SandboxRail, SimulatedRail, type PayPalRail } from "@agent-tab/paypal";
 import type { PayPalNetwork } from "@agent-tab/x402-paypal";
+import { modelFromEnv } from "@agent-tab/agent";
 import { buildDemo } from "./app.ts";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -22,6 +23,7 @@ if (hasPayPal) {
   network = "paypal:simulated";
 }
 
+const model = await modelFromEnv(process.env);
 const htmlPath = fileURLToPath(new URL("../public/index.html", import.meta.url));
 const { app, service, ready } = buildDemo({
   rail,
@@ -32,7 +34,7 @@ const { app, service, ready } = buildDemo({
   platformFeeBps: Number(process.env.PLATFORM_FEE_BPS ?? 1000),
   payoutReceiver: (id) =>
     process.env[`PAYOUT_${id.toUpperCase().replace(/-/g, "_")}`] ?? process.env.PAYOUT_RECEIVER ?? `${id}@example.com`,
-  ...(process.env.ANTHROPIC_API_KEY ? { anthropicKey: process.env.ANTHROPIC_API_KEY } : {}),
+  ...(model ? { model } : {}),
   maxClaudeRunsPerHour: Number(process.env.MAX_CLAUDE_RUNS_PER_HOUR ?? 20),
   webHtml: () => readFileSync(htmlPath, "utf8"),
   // Behind Render's proxy set TRUST_PROXY_HOPS=1; locally the socket address is used.
@@ -42,6 +44,6 @@ const { app, service, ready } = buildDemo({
 serve({ fetch: app.fetch, port }, async () => {
   await ready();
   setInterval(() => void service.sweep().catch((e) => console.error("sweep", e)), 60_000);
-  console.log(`AgentTab demo on ${publicUrl}  rail=${rail.mode}  agent=${process.env.ANTHROPIC_API_KEY ? "claude" : "scripted"}`);
+  console.log(`AgentTab demo on ${publicUrl}  rail=${rail.mode}  agent=${model ? `${model.label} (${model.model})` : "scripted"}`);
   if (!hasPayPal) console.log("No PAYPAL_CLIENT_ID/SECRET: using the SIMULATED rail (no real PayPal calls).");
 });

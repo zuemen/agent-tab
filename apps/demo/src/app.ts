@@ -9,7 +9,7 @@ import { generateAgentKeyPair, type AgentKeyPair } from "@agent-tab/core";
 import { SandboxRail, type PayPalRail } from "@agent-tab/paypal";
 import { OWNER_HEADER, TabService, UserError, clientIp, createApp, rateLimiter, type SellerConfig } from "@agent-tab/facilitator";
 import { SELLERS, facilitatorClientFor, prepareSeller, type PreparedSeller } from "@agent-tab/seller-mcp";
-import { connectSeller, runClaudeAgent, runScriptedAgent, type AgentEvent } from "@agent-tab/agent";
+import { connectSeller, runClaudeAgent, runScriptedAgent, type AgentEvent, type ModelClient } from "@agent-tab/agent";
 import type { PayPalNetwork } from "@agent-tab/x402-paypal";
 import { askAssistant, connectPayPalToolkit } from "./assistant.ts";
 
@@ -28,7 +28,8 @@ export interface DemoOptions {
   dataDir?: string;
   platformFeeBps?: number;
   payoutReceiver: (sellerId: string) => string;
-  anthropicKey?: string;
+  /** The model behind the agent and the tab assistant; without one the agent runs the scripted plan. */
+  model?: ModelClient;
   maxClaudeRunsPerHour?: number;
   webHtml?: () => string;
   /** See AppOptions.trustProxyHops. */
@@ -41,7 +42,7 @@ interface AgentSession {
   questions: number;
   running: boolean;
   log: AgentEvent[];
-  mode?: "claude" | "scripted";
+  mode?: "ai" | "scripted";
   note?: string;
 }
 
@@ -111,7 +112,8 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
   app.get("/api/demo/info", (c) =>
     c.json({
       task: DEMO_TASK,
-      agentMode: opts.anthropicKey ? "claude" : "scripted",
+      agentMode: opts.model ? "ai" : "scripted",
+      ...(opts.model ? { agentModel: opts.model.label } : {}),
       rail: opts.rail.mode,
       sellers: SELLERS.map((s) => ({ id: s.id, name: s.name, description: s.description, tools: s.tools.map((t) => ({ name: t.name, title: t.title, price: t.price ?? null })) })),
       demoSellers: DEMO_SELLERS,
@@ -151,12 +153,12 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     const view = service.view(tabId) as { status: string };
     if (view.status !== "active") return c.json({ error: `tab is ${view.status}` }, 409);
 
-    const wantClaude = !!opts.anthropicKey;
+    const wantClaude = !!opts.model;
     const useClaude = wantClaude && allowClaude(c);
     session.running = true;
     session.runs++;
-    session.mode = useClaude ? "claude" : "scripted";
-    session.note = wantClaude && !useClaude ? "Claude quota for this hour is used up, so this run follows the scripted plan." : undefined;
+    session.mode = useClaude ? "ai" : "scripted";
+    session.note = wantClaude && !useClaude ? "The model quota for this hour is used up, so this run follows the scripted plan." : undefined;
     session.log = [];
     const emit = (ev: AgentEvent) => {
       if (session.log.length < 300) session.log.push(ev);
@@ -172,7 +174,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
           conns.push(await connectSeller(p.seller.id, p.seller.name, clientT, opts.network, () => signer));
         }
         const base = { task: DEMO_TASK, sellers: conns, tabStatus: async () => service.view(tabId), onEvent: emit };
-        if (useClaude) await runClaudeAgent({ ...base, maxTurns: 12 });
+        if (useClaude && opts.model) await runClaudeAgent({ ...base, anthropic: opts.model.client, model: opts.model.model, maxTurns: 12 });
         else await runScriptedAgent(base);
       } catch (err) {
         console.error("agent run", tabId, err);
@@ -185,13 +187,13 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     return c.json({ started: true, mode: session.mode, ...(session.note ? { note: session.note } : {}) }, 202);
   });
 
-  // ---- tab assistant (Claude + PayPal Agent Toolkit), owner only ----
+  // ---- tab assistant (language model + PayPal Agent Toolkit), owner only ----
   let toolkit: { client: Client; at: number } | undefined;
   app.post("/api/tabs/:id/ask", async (c) => {
     const tabId = c.req.param("id");
     if (!service.has(tabId)) return c.json({ error: "unknown tab" }, 404);
     if (!service.isOwner(tabId, c.req.header(OWNER_HEADER))) return c.json({ error: "only the tab owner can do this" }, 403);
-    if (!opts.anthropicKey) return c.json({ error: "The tab assistant needs ANTHROPIC_API_KEY on the server." }, 503);
+    if (!opts.model) return c.json({ error: "The tab assistant needs a model key on the server (GEMINI_API_KEY, LLM_API_KEY or ANTHROPIC_API_KEY)." }, 503);
     const { question } = (await c.req.json().catch(() => ({}))) as { question?: string };
     if (typeof question !== "string" || !question.trim() || question.length > 500) return c.json({ error: "Ask a question (max 500 characters)." }, 400);
     const session = sessions.get(tabId);
@@ -209,6 +211,8 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
         facts: { tabId, ...(view.paypal?.orderId ? { orderId: view.paypal.orderId } : {}), view },
         proposeRefund: (n, reason) => service.proposeRefund(tabId, n, reason || "requested in the tab assistant"),
         ...(toolkit ? { toolkit: toolkit.client } : {}),
+        anthropic: opts.model.client,
+        model: opts.model.model,
         onEvent: (ev) => {
           actions.push(ev);
           service.events.emit("event", { tabId, type: "assistant", at: Date.now(), detail: ev });

@@ -14,7 +14,7 @@ export const REFUSAL_FALLBACK: Pick<Anthropic.Beta.Messages.MessageCreateParamsN
   fallbacks: "default",
 };
 
-export const REFUSED_ANSWER = "Claude declined to continue this run, so nothing more was bought. The tab is unaffected.";
+export const REFUSED_ANSWER = "The model declined to continue this run, so nothing more was bought. The tab is unaffected.";
 
 export type AgentEvent =
   | { type: "thinking"; text: string }
@@ -24,7 +24,7 @@ export type AgentEvent =
   | { type: "payment_refused"; seller: string; tool: string; reason: string }
   | { type: "tool_error"; seller: string; tool: string; message: string }
   | { type: "tool_result"; seller: string; tool: string; ok: boolean }
-  | { type: "done"; answer: string; mode: "claude" | "scripted" };
+  | { type: "done"; answer: string; mode: "ai" | "scripted" };
 
 export interface SellerConnection {
   sellerId: string;
@@ -140,7 +140,10 @@ async function callSellerTool(conn: SellerConnection, tool: string, input: Recor
   }
 }
 
-/** Claude decides what to buy. Requires ANTHROPIC_API_KEY (or a client). */
+/**
+ * The language model decides what to buy. Claude by default (ANTHROPIC_API_KEY);
+ * pass `anthropic` from createOpenAICompatClient to run another model.
+ */
 export async function runClaudeAgent(opts: RunOptions): Promise<string> {
   const anthropic = opts.anthropic ?? new Anthropic();
   const routes = new Map<string, { conn: SellerConnection; tool: string }>();
@@ -179,7 +182,7 @@ export async function runClaudeAgent(opts: RunOptions): Promise<string> {
     }
     if (response.stop_reason === "pause_turn") continue;
     if (response.stop_reason === "refusal") {
-      opts.onEvent({ type: "done", answer: REFUSED_ANSWER, mode: "claude" });
+      opts.onEvent({ type: "done", answer: REFUSED_ANSWER, mode: "ai" });
       return REFUSED_ANSWER;
     }
     const uses = response.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
@@ -189,7 +192,7 @@ export async function runClaudeAgent(opts: RunOptions): Promise<string> {
         .map((b) => b.text)
         .join("\n")
         .trim();
-      opts.onEvent({ type: "done", answer, mode: "claude" });
+      opts.onEvent({ type: "done", answer, mode: "ai" });
       return answer;
     }
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
@@ -209,7 +212,7 @@ export async function runClaudeAgent(opts: RunOptions): Promise<string> {
     messages.push({ role: "user", content: results });
   }
   const answer = "Stopped: too many turns.";
-  opts.onEvent({ type: "done", answer, mode: "claude" });
+  opts.onEvent({ type: "done", answer, mode: "ai" });
   return answer;
 }
 

@@ -262,7 +262,7 @@ function renderLanding() {
       <h1 style="margin-top:14px">Give your agent a tab,<br>not your card.</h1>
       <p class="lede">Your agent asks for a budget. You approve it once with PayPal. Every paid tool call is checked against your rules, metered on the tab, and captured in batches. When you close the tab, the unused amount is released and each seller is paid out.</p>
       <button class="cta" id="start">Start the demo →</button>
-      <p class="fine">Demo sellers, places and prices are fictional. ${INFO.rail === "sandbox" ? "Payments run against the PayPal sandbox (test money)." : "This server has no PayPal credentials, so it uses a simulated rail; nothing is charged."} Agent: ${INFO.agentMode === "claude" ? "Claude decides what to buy." : "scripted purchase plan (no language model configured)."}</p>
+      <p class="fine">Demo sellers, places and prices are fictional. ${INFO.rail === "sandbox" ? "Payments run against the PayPal sandbox (test money)." : "This server has no PayPal credentials, so it uses a simulated rail; nothing is charged."} Agent: ${INFO.agentMode === "ai" ? `${esc(INFO.agentModel)} decides what to buy.` : "scripted purchase plan (no language model configured)."}</p>
     </div>
     <div class="slip torn demo-slip" aria-label="Example tab">
       <div class="eyebrow" style="margin-bottom:12px">Example tab · authorized $5.00</div>
@@ -453,13 +453,13 @@ function renderDashboard(q) {
       ${(TAB.refunds || []).length ? `<section class="slip panel"><div class="panel-head"><h3>Refunds</h3><span class="count">nothing moves until you confirm</span></div>
         <table class="ledger"><tbody>${TAB.refunds.map((r) => `<tr><td>Call #${r.entrySeq} · ${esc(sellerName(r.seller))}<div class="muted" style="font-size:12.5px">${esc(r.reason)}${r.paypalRefundId ? ` · <span class="num">${esc(r.paypalRefundId)}</span>` : ""}${r.afterPayout ? " · after payout (platform absorbs)" : ""}${r.error ? ` · <span style="color:var(--red)">${esc(r.error)}</span>` : ""}</div></td>
           <td class="amt">${money(r.amount)}<div>${r.status === "proposed" || r.status === "pending" ? `<button class="ghost" style="padding:6px 10px;margin-top:6px" data-confirm="${esc(r.id)}">${r.status === "pending" ? "Retry" : "Confirm refund"}</button>` : `<span class="muted" style="font-size:12px">${esc(r.status)}</span>`}</div></td></tr>`).join("")}</tbody></table></section>` : ""}
-      <section class="slip panel"><div class="panel-head"><h3>Ask about this tab</h3><span class="count">${INFO.agentMode === "claude" ? (INFO.rail === "sandbox" ? "Claude + PayPal Agent Toolkit" : "Claude · ledger only") : "needs a Claude API key"}</span></div>
-        ${INFO.agentMode === "claude" ? `<form id="ask" style="display:flex;gap:10px;padding:14px 18px"><input id="q" class="plain" maxlength="500" placeholder="e.g. What did the panel question cost? Refund it." style="flex:1" value="${esc(DRAFT)}"><button class="ghost" id="askbtn" ${ASKING ? "disabled" : ""}>${ASKING ? "Thinking…" : "Ask"}</button></form>
+      <section class="slip panel"><div class="panel-head"><h3>Ask about this tab</h3><span class="count">${INFO.agentMode === "ai" ? (INFO.rail === "sandbox" ? `${esc(INFO.agentModel)} + PayPal Agent Toolkit` : `${esc(INFO.agentModel)} · ledger only`) : "needs a model API key"}</span></div>
+        ${INFO.agentMode === "ai" ? `<form id="ask" style="display:flex;gap:10px;padding:14px 18px"><input id="q" class="plain" maxlength="500" placeholder="e.g. What did the panel question cost? Refund it." style="flex:1" value="${esc(DRAFT)}"><button class="ghost" id="askbtn" ${ASKING ? "disabled" : ""}>${ASKING ? "Thinking…" : "Ask"}</button></form>
         ${ASK ? `<p class="answer" style="border-top:1px solid var(--rule)"><b>Q:</b> ${esc(ASK.q)}
 
-${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and proposes refunds for you to confirm. It needs ANTHROPIC_API_KEY on the server.</div>`}
+${esc(ASK.a)}</p>` : ""}` : `<div class="empty">The tab assistant explains charges and proposes refunds for you to confirm. It needs a model API key on the server.</div>`}
       </section>
-      <section class="slip panel"><div class="panel-head"><h3>Agent activity</h3><span class="count">${INFO.agentMode === "claude" ? "Claude" : "scripted"}</span></div>
+      <section class="slip panel"><div class="panel-head"><h3>Agent activity</h3><span class="count">${INFO.agentMode === "ai" ? esc(INFO.agentModel) : "scripted"}</span></div>
         ${FEED.length ? `<ul class="feed" id="feed">${FEED.map(feedItem).join("")}</ul>` : `<div class="empty">The agent's purchases and refusals appear here as they happen.</div>`}
         ${ANSWER ? `<p class="answer">${esc(ANSWER)}</p>` : ""}
       </section>
@@ -529,7 +529,7 @@ function plainReason(code) {
 function feedItem(ev) {
   const row = (cls, ico, what, amt = "") => `<li class="${cls}"><span class="ico">${ico}</span><span class="what">${what}</span><span class="amt">${amt}</span></li>`;
   switch (ev.type) {
-    case "start": return row("", "▸", `Agent started (${ev.mode === "claude" ? "Claude" : "scripted plan"})`);
+    case "start": return row("", "▸", `Agent started (${ev.mode === "ai" ? esc(INFO.agentModel) : "scripted plan"})`);
     case "tool_call": return row("", "→", `${esc(ev.seller)} · ${esc(ev.tool)}`, ev.price === "free" ? "free" : esc(ev.price));
     case "payment": return row("pay", "✓", `Paid ${esc(ev.seller)} for ${esc(ev.tool)}`, esc(ev.amount));
     case "payment_refused": return row("refused", "✕", `<span title="${esc(ev.reason)}">Refused: ${esc(ev.seller)} · ${esc(ev.tool)} — ${esc(plainReason(ev.reason))}</span>`);

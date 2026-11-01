@@ -18,6 +18,8 @@ services:
         sync: false
       - key: PAYOUT_RECEIVER
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false # free tier key from aistudio.google.com; or set ANTHROPIC_API_KEY instead
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: MAX_CLAUDE_RUNS_PER_HOUR

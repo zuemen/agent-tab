@@ -46,6 +46,12 @@ interface AgentSession {
   note?: string;
 }
 
+/** " (model HTTP 401)" for a failed model request, so a bad key is visible without logs. Never includes the body. */
+function httpStatus(err: unknown): string {
+  const m = /request failed: (\d{3})/.exec((err as Error)?.message ?? "");
+  return m ? ` (model HTTP ${m[1]}${m[1] === "400" || m[1] === "401" || m[1] === "403" ? ": check the model API key" : ""})` : "";
+}
+
 export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; ready: () => Promise<void> } {
   const sellerConfigs: SellerConfig[] = SELLERS.map((s) => ({
     id: s.id,
@@ -188,7 +194,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
           type: "done",
           answer: quota
             ? "The agent stopped: the free AI quota for today ran out mid-run (it resets at midnight Pacific time). What it bought so far stays on the tab; you can close it."
-            : "The agent stopped because of an error. The tab is unaffected; you can close it.",
+            : `The agent stopped because of an error${httpStatus(err)}. The tab is unaffected; you can close it.`,
           mode: session.mode!,
         });
       } finally {
@@ -234,7 +240,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     } catch (err) {
       console.error("assistant", tabId, err);
       if ((err as Error).name === "ModelQuotaError") return c.json({ error: "The free AI quota for today is used up (it resets at midnight Pacific time)." }, 429);
-      return c.json({ error: "The assistant could not answer right now." }, 502);
+      return c.json({ error: `The assistant could not answer right now${httpStatus(err)}.` }, 502);
     }
   });
 

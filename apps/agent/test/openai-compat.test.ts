@@ -158,3 +158,21 @@ describe("model rotation on daily quota", () => {
     expect(allOut.available!()).toBe(false);
   });
 });
+
+describe("keys from the environment", () => {
+  it("trims whitespace pasted around a key", async () => {
+    let auth = "";
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (_u: string, init: RequestInit) => {
+      auth = (init.headers as Record<string, string>).authorization ?? "";
+      return Response.json({ choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+    }) as unknown as typeof fetch;
+    try {
+      const m = await modelFromEnv({ GEMINI_API_KEY: "  abc\r\n" });
+      await (m!.client.beta.messages.create as unknown as (p: unknown) => Promise<unknown>)({ messages: [{ role: "user", content: "q" }] });
+    } finally {
+      globalThis.fetch = real;
+    }
+    expect(auth).toBe("Bearer abc");
+  });
+});

@@ -235,13 +235,13 @@ export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite,gemini-3.1-flash-lite
 export async function modelFromEnv(env: Record<string, string | undefined>): Promise<ModelClient | undefined> {
   if (env.ANTHROPIC_API_KEY) {
     const { default: AnthropicClient } = await import("@anthropic-ai/sdk");
-    return { client: new AnthropicClient({ apiKey: env.ANTHROPIC_API_KEY }), label: "Claude", model: env.AGENT_MODEL ?? "claude-sonnet-5-5" };
+    return { client: new AnthropicClient({ apiKey: env.ANTHROPIC_API_KEY.trim() }), label: "Claude", model: env.AGENT_MODEL ?? "claude-sonnet-5-5" };
   }
   if (env.LLM_BASE_URL && env.LLM_API_KEY) {
-    return createOpenAICompatClient({ baseUrl: env.LLM_BASE_URL, apiKey: env.LLM_API_KEY, model: env.LLM_MODEL ?? "", label: env.LLM_LABEL ?? env.LLM_MODEL ?? "LLM" });
+    return createOpenAICompatClient({ baseUrl: env.LLM_BASE_URL.trim(), apiKey: env.LLM_API_KEY.trim(), model: env.LLM_MODEL ?? "", label: env.LLM_LABEL ?? env.LLM_MODEL ?? "LLM" });
   }
   if (env.GEMINI_API_KEY) {
-    return createOpenAICompatClient({ baseUrl: GEMINI_BASE_URL, apiKey: env.GEMINI_API_KEY, model: env.LLM_MODEL ?? GEMINI_DEFAULT_MODEL, label: env.LLM_LABEL ?? "Gemini" });
+    return createOpenAICompatClient({ baseUrl: GEMINI_BASE_URL, apiKey: env.GEMINI_API_KEY.trim(), model: env.LLM_MODEL ?? GEMINI_DEFAULT_MODEL, label: env.LLM_LABEL ?? "Gemini" });
   }
   return undefined;
 }

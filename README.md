@@ -34,7 +34,7 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 
 - **Give the agent your card.** No limits, no allowlist, no way to see what it bought until the statement arrives.
 - **Approve every purchase by hand.** Safe, but it defeats the point of an agent. (The paid-MCP integration with PayPal support that we found asks for one approval per call.)
-- **Pay per call on a card or PayPal.** Fixed fees make small charges uneconomic. US PayPal Checkout is 3.49% + $0.49 per transaction ([PayPal fees, 2026-10-01](https://www.paypal.com/us/business/paypal-business-fees)); the fixed fee alone on a $0.05 article is almost ten times its price.
+- **Pay per call on a card or PayPal.** Fixed fees make small charges uneconomic. US PayPal Checkout is 3.49% + $0.49 per transaction ([PayPal fees, 2026-10-01](https://www.paypal.com/us/business/paypal-business-fees)); the fixed fee alone on a $0.05 article is almost ten times its price. Even PayPal's micropayments rate (4.99% + $0.09) puts $4.10 of fees on 40 calls averaging $0.25, against $0.84 for one $10 capture.
 
 ## How AgentTab works
 

@@ -24,7 +24,7 @@ Your agent asks for a budget. You approve it once with PayPal. Every paid tool c
 
 *Screenshots from a run on the hosted demo (PayPal sandbox, 2026-11-02).*
 
-The hosted model is Gemini on Google's free tier. If its daily quota runs out, the page says so and the agent follows a labeled scripted plan; the PayPal flow is unchanged. To run it yourself, see [Run it](#run-it).
+The hosted model is Gemini on Google's free tier. If its daily quota runs out, the page says so: the agent follows a labeled scripted plan and the assistant answers by labeled fixed rules; the PayPal flow, including refunds, is unchanged. To run it yourself, see [Run it](#run-it).
 
 ---
 
@@ -78,7 +78,7 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 - **The buying agent** (`apps/agent/src/agent.ts`) is a language model with tool use. It sees each seller's tools and prices, decides what is worth buying for the owner's question, pays from the tab, and reports what it bought and why. Refused payments come back as tool errors and the agent explains them instead of working around them.
 - **The tab assistant** (`apps/demo/src/assistant.ts`) answers the owner's questions about the tab ("which charge was least worth it?"), checks the order with PayPal through the PayPal Agent Toolkit, and can *propose* a refund of a specific call. It never moves money: the owner confirms each refund.
 - **Which model.** The hosted demo runs **Gemini Flash-Lite on Google's free tier** (rotating to the next Gemini model when one model's daily free quota is used up), through a small adapter (`apps/agent/src/openai-compat.ts`) that serves the same tool-use loop over any OpenAI-compatible chat completions API. The loops were written for Claude and run on it unchanged when `ANTHROPIC_API_KEY` is set (it takes precedence). Configure with `GEMINI_API_KEY`, or `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` for another provider. `npm run model:check` runs the demo once with the configured model on the simulated rail.
-- The free tier is rate-limited per model per day. The server also caps model runs at `MAX_CLAUDE_RUNS_PER_HOUR` (default 20); beyond that, when every model's daily quota is used up (the UI says so; quotas reset at midnight Pacific), or with no model key at all, the agent runs a fixed **scripted** purchase plan and the UI says so. The tab assistant needs a model key.
+- The free tier is rate-limited per model per day. The server also caps model runs at `MAX_CLAUDE_RUNS_PER_HOUR` (default 20); beyond that, when every model's daily quota is used up (the UI says so; quotas reset at midnight Pacific), or with no model key at all, the agent runs a fixed **scripted** purchase plan and the UI says so. When the model is out of quota, the tab assistant answers by fixed rules and says so (for a refund request it picks another purchase from a paid tool already used, otherwise the most expensive call); the owner still confirms every refund. With no model key at all, the assistant is off.
 
 ## What the tab enforces, and where
 
@@ -127,7 +127,7 @@ Each demo seller is a Streamable HTTP MCP server at `http://localhost:4020/mcp/<
 ## Tests
 
 ```bash
-npm test          # 90 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
+npm test          # 94 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
 npm run typecheck
 ```
 

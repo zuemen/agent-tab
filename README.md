@@ -24,7 +24,7 @@ AI agents increasingly need to buy things per call: an article, a data query, an
  reviews request ──► create Orders v2 order, intent=AUTHORIZE ──► buyer approves
                      authorize order  ◄────────────────────────── authorization (the budget hold)
 
- AI agent (Claude) ──► seller's MCP tool ──► "payment required" (x402)
+ AI agent (LLM)    ──► seller's MCP tool ──► "payment required" (x402)
         │ signs a per-call charge with its own key
         └──────────► seller's MCP tool ──► /verify  (read-only checks)
                                          tool runs
@@ -55,9 +55,10 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 
 ## Where the AI is
 
-- **The buying agent** (`apps/agent/src/agent.ts`) is Claude with tool use. It sees each seller's tools and prices, decides what is worth buying for the owner's question, pays from the tab, and reports what it bought and why. Refused payments come back as tool errors and the agent explains them instead of working around them.
+- **The buying agent** (`apps/agent/src/agent.ts`) is a language model with tool use. It sees each seller's tools and prices, decides what is worth buying for the owner's question, pays from the tab, and reports what it bought and why. Refused payments come back as tool errors and the agent explains them instead of working around them.
 - **The tab assistant** (`apps/demo/src/assistant.ts`) answers the owner's questions about the tab ("what did the panel question cost?"), checks the order with PayPal through the PayPal Agent Toolkit, and can *propose* a refund of a specific call. It never moves money: the owner confirms each refund.
-- Without an `ANTHROPIC_API_KEY`, the demo agent runs a fixed **scripted** purchase plan instead, and the UI says so.
+- **Which model.** The hosted demo runs **Gemini Flash-Lite on Google's free tier** (rotating to the next Gemini model when one model's daily free quota is used up), through a small adapter (`apps/agent/src/openai-compat.ts`) that serves the same tool-use loop over any OpenAI-compatible chat completions API. The loops were written for Claude and run on it unchanged when `ANTHROPIC_API_KEY` is set (it takes precedence). Configure with `GEMINI_API_KEY`, or `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` for another provider. `npm run model:check` runs the demo once with the configured model on the simulated rail.
+- The free tier is rate-limited per model per day. The server also caps model runs at `MAX_CLAUDE_RUNS_PER_HOUR` (default 20); beyond that, when every model's daily quota is used up (the UI says so; quotas reset at midnight Pacific), or with no model key at all, the agent runs a fixed **scripted** purchase plan and the UI says so. The tab assistant needs a model key.
 
 ## What the tab enforces, and where
 
@@ -81,7 +82,7 @@ Requires Node 20+.
 
 ```bash
 npm install
-cp .env.example .env      # add PayPal sandbox credentials (optional) and ANTHROPIC_API_KEY (optional)
+cp .env.example .env      # add PayPal sandbox credentials (optional) and a model key: GEMINI_API_KEY (free tier) or ANTHROPIC_API_KEY (optional)
 npm start                 # http://localhost:4020
 ```
 
@@ -151,7 +152,7 @@ packages/paypal       PayPal REST rail (sandbox) + simulated rail
 packages/x402-paypal  the paypal-tab x402 scheme (server + client)
 apps/facilitator      x402 facilitator + tab API (Hono)
 apps/seller-mcp       demo sellers as MCP servers (fictional data)
-apps/agent            Claude buying agent + scripted mode
+apps/agent            buying agent (Claude or any OpenAI-compatible model) + scripted mode
 apps/demo             all-in-one server, web UI, tab assistant (PayPal Agent Toolkit)
 scripts               sandbox smoke test
 ```

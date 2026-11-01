@@ -154,11 +154,16 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     if (view.status !== "active") return c.json({ error: `tab is ${view.status}` }, 409);
 
     const wantClaude = !!opts.model;
-    const useClaude = wantClaude && allowClaude(c);
+    const modelUp = !!opts.model && (opts.model.available?.() ?? true);
+    const useClaude = wantClaude && modelUp && allowClaude(c);
     session.running = true;
     session.runs++;
     session.mode = useClaude ? "ai" : "scripted";
-    session.note = wantClaude && !useClaude ? "The model quota for this hour is used up, so this run follows the scripted plan." : undefined;
+    session.note = wantClaude && !useClaude
+      ? modelUp
+        ? "The model quota for this hour is used up, so this run follows the scripted plan."
+        : "The free AI quota for today is used up (it resets at midnight Pacific time), so this run follows the scripted plan."
+      : undefined;
     session.log = [];
     const emit = (ev: AgentEvent) => {
       if (session.log.length < 300) session.log.push(ev);
@@ -178,7 +183,14 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
         else await runScriptedAgent(base);
       } catch (err) {
         console.error("agent run", tabId, err);
-        emit({ type: "done", answer: "The agent stopped because of an error. The tab is unaffected; you can close it.", mode: session.mode! });
+        const quota = (err as Error).name === "ModelQuotaError";
+        emit({
+          type: "done",
+          answer: quota
+            ? "The agent stopped: the free AI quota for today ran out mid-run (it resets at midnight Pacific time). What it bought so far stays on the tab; you can close it."
+            : "The agent stopped because of an error. The tab is unaffected; you can close it.",
+          mode: session.mode!,
+        });
       } finally {
         session.running = false;
         for (const conn of conns) await conn.client.close().catch(() => undefined);
@@ -221,6 +233,7 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
       return c.json({ answer, actions, paypalTools: !!toolkit });
     } catch (err) {
       console.error("assistant", tabId, err);
+      if ((err as Error).name === "ModelQuotaError") return c.json({ error: "The free AI quota for today is used up (it resets at midnight Pacific time)." }, 429);
       return c.json({ error: "The assistant could not answer right now." }, 502);
     }
   });

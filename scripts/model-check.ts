@@ -51,7 +51,7 @@ for (const ev of s.log) {
 const after = await fetch(`${base}/api/tabs/${start.tabId}`, { headers: H() }).then(j);
 console.log(`agent took ${Math.round((Date.now() - t0) / 1000)}s; spent ${after.totals?.spent} of ${after.totals?.budget ?? after.mandate?.budget}`);
 
-const ask = await fetch(`${base}/api/tabs/${start.tabId}/ask`, { method: "POST", headers: H(), body: JSON.stringify({ question: "What did the panel question cost? Was it worth it? If not, refund it." }) }).then(j);
+const ask = await fetch(`${base}/api/tabs/${start.tabId}/ask`, { method: "POST", headers: H(), body: JSON.stringify({ question: "Which charge was least worth it? Propose a refund for it." }) }).then(j);
 console.log("\nassistant:", ask.answer ?? ask.error);
 console.log("assistant actions:", JSON.stringify(ask.actions ?? []));
 server.close();

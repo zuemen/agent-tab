@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx apps/demo/src/main.ts",
     "start": "tsx apps/demo/src/main.ts",
-    "sandbox:smoke": "tsx scripts/sandbox-smoke.ts"
+    "sandbox:smoke": "tsx scripts/sandbox-smoke.ts",
+    "model:check": "tsx scripts/model-check.ts"
   },
   "engines": {
     "node": ">=20"

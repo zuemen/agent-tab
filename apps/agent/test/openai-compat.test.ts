@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanSchema, createOpenAICompatClient, fromChatReply, modelFromEnv, toChatMessages } from "../src/openai-compat.ts";
+import { cleanSchema, createOpenAICompatClient, fromChatReply, isDailyQuota, modelFromEnv, retryHintSeconds, toChatMessages } from "../src/openai-compat.ts";
 
 describe("OpenAI-compatible adapter", () => {
   it("translates system, tool calls with provider extras, and tool results", () => {
@@ -95,7 +95,7 @@ describe("OpenAI-compatible adapter", () => {
 
   it("picks the model from the environment", async () => {
     expect(await modelFromEnv({})).toBeUndefined();
-    expect(await modelFromEnv({ GEMINI_API_KEY: "g" })).toMatchObject({ label: "Gemini", model: "gemini-3.5-flash" });
+    expect(await modelFromEnv({ GEMINI_API_KEY: "g" })).toMatchObject({ label: "Gemini", model: "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash" });
     expect(await modelFromEnv({ GEMINI_API_KEY: "g", LLM_MODEL: "gemini-x", LLM_LABEL: "Gemini X" })).toMatchObject({ label: "Gemini X", model: "gemini-x" });
     expect(await modelFromEnv({ LLM_BASE_URL: "https://x", LLM_API_KEY: "k", LLM_MODEL: "llama" })).toMatchObject({ label: "llama", model: "llama" });
     expect(await modelFromEnv({ ANTHROPIC_API_KEY: "a", GEMINI_API_KEY: "g" })).toMatchObject({ label: "Claude", model: "claude-sonnet-5-5" });
@@ -112,5 +112,49 @@ describe("OpenAI-compatible adapter timeouts", () => {
     const m = createOpenAICompatClient({ baseUrl: "https://llm.test", apiKey: "k", model: "m", label: "Test", fetch: hang, timeoutMs: 20, maxRetries: 1 });
     await expect((m.client.beta.messages.create as unknown as (p: unknown) => Promise<unknown>)({ messages: [{ role: "user", content: "q" }] })).rejects.toThrow(/Test request failed/);
     expect(n).toBe(2);
+  });
+});
+
+describe("model rotation on daily quota", () => {
+  const daily = JSON.stringify([{ error: { code: 429, message: "Quota exceeded ... quotaId GenerateRequestsPerDayPerProjectPerModel-FreeTier. Please retry in 16h24m30.19s." } }]);
+  const create = (m: { client: unknown }) => (m.client as { beta: { messages: { create: (p: unknown) => Promise<unknown> } } }).beta.messages.create;
+
+  it("parses retry hints and tells daily from per-minute quotas", () => {
+    expect(retryHintSeconds("Please retry in 16h24m30.19s.")).toBeCloseTo(59070.19, 1);
+    expect(retryHintSeconds("Please retry in 12.5s.")).toBe(12.5);
+    expect(retryHintSeconds("no hint")).toBeUndefined();
+    expect(isDailyQuota(daily)).toBe(true);
+    expect(isDailyQuota("per minute limit. Please retry in 12s.")).toBe(false);
+  });
+
+  it("switches to the next model, swaps foreign thought signatures, and reports when all are used up", async () => {
+    const sent: { model: string; messages: { tool_calls?: { extra_content?: { google?: { thought_signature?: string } } }[] }[] }[] = [];
+    const fake = (async (_u: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      sent.push(body);
+      if (body.model === "a") return new Response(daily, { status: 429 });
+      return Response.json({ choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+    }) as unknown as typeof fetch;
+    const m = createOpenAICompatClient({ baseUrl: "https://llm.test", apiKey: "k", model: "a, b", label: "Test", fetch: fake, retryDelayMs: 1 });
+    expect(m.model).toBe("a,b");
+    const history = {
+      messages: [
+        { role: "user", content: "q" },
+        { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "t", input: {}, _model: "a", _compat: { extra_content: { google: { thought_signature: "from-a" } } } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "r" }] },
+      ],
+    };
+    expect(await create(m)(history)).toEqual({ stop_reason: "end_turn", content: [{ type: "text", text: "ok" }] });
+    expect(sent.map((b) => b.model)).toEqual(["a", "b"]);
+    expect(sent[0]!.messages[1]!.tool_calls![0]!.extra_content!.google!.thought_signature).toBe("from-a");
+    expect(sent[1]!.messages[1]!.tool_calls![0]!.extra_content!.google!.thought_signature).toBe("skip_thought_signature_validator");
+    // "a" is now skipped without a request.
+    await create(m)({ messages: [{ role: "user", content: "q" }] });
+    expect(sent.map((b) => b.model)).toEqual(["a", "b", "b"]);
+    expect(m.available!()).toBe(true);
+
+    const allOut = createOpenAICompatClient({ baseUrl: "https://llm.test", apiKey: "k", model: "a", label: "Test", fetch: fake, retryDelayMs: 1 });
+    await expect(create(allOut)({ messages: [{ role: "user", content: "q" }] })).rejects.toMatchObject({ name: "ModelQuotaError" });
+    expect(allOut.available!()).toBe(false);
   });
 });

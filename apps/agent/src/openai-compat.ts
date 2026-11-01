@@ -28,7 +28,17 @@ export interface ModelClient {
   client: Anthropic;
   label: string;
   model: string;
+  /** False while every configured model is out of its daily quota. */
+  available?: () => boolean;
 }
+
+/** Every configured model is out of its daily quota. */
+export class ModelQuotaError extends Error {
+  override name = "ModelQuotaError";
+}
+
+/** Gemini accepts this in place of a thought signature produced by a different model. */
+const SKIP_SIGNATURE = "skip_thought_signature_validator";
 
 interface Block {
   type: string;
@@ -41,6 +51,8 @@ interface Block {
   is_error?: boolean;
   /** Provider fields on a tool call (e.g. Gemini thought signatures) that must be sent back. */
   _compat?: Record<string, unknown>;
+  /** The model that produced this tool call. */
+  _model?: string;
 }
 
 interface ChatMessage {
@@ -75,7 +87,16 @@ export function cleanSchema(schema: unknown): unknown {
   return out;
 }
 
-export function toChatMessages(params: CreateParams): ChatMessage[] {
+function compatFor(b: Block, model: string | undefined): Record<string, unknown> {
+  const extra = b._compat ?? {};
+  if (!model || !b._model || b._model === model) return extra;
+  // A tool call made by another model: its thought signature is not valid for this one.
+  const google = (extra.extra_content as { google?: Record<string, unknown> } | undefined)?.google;
+  if (!google?.thought_signature) return extra;
+  return { ...extra, extra_content: { ...(extra.extra_content as object), google: { ...google, thought_signature: SKIP_SIGNATURE } } };
+}
+
+export function toChatMessages(params: CreateParams, model?: string): ChatMessage[] {
   const out: ChatMessage[] = [];
   const system = Array.isArray(params.system) ? params.system.map((s) => s.text).join("\n") : params.system;
   if (system) out.push({ role: "system", content: system });
@@ -88,7 +109,7 @@ export function toChatMessages(params: CreateParams): ChatMessage[] {
       const said = m.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
       const calls = m.content
         .filter((b) => b.type === "tool_use")
-        .map((b) => ({ ...(b._compat ?? {}), id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } }));
+        .map((b) => ({ ...compatFor(b, model), id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } }));
       out.push({ role: "assistant", content: said || null, ...(calls.length ? { tool_calls: calls } : {}) });
       continue;
     }
@@ -112,7 +133,7 @@ interface ChatReply {
   }[];
 }
 
-export function fromChatReply(reply: ChatReply, newId: () => string): { stop_reason: string; content: Block[] } {
+export function fromChatReply(reply: ChatReply, newId: () => string, model?: string): { stop_reason: string; content: Block[] } {
   const msg = reply.choices?.[0]?.message ?? {};
   const content: Block[] = [];
   if (msg.content && msg.content.trim()) content.push({ type: "text", text: msg.content });
@@ -124,27 +145,47 @@ export function fromChatReply(reply: ChatReply, newId: () => string): { stop_rea
     } catch {
       input = {};
     }
-    content.push({ type: "tool_use", id: id || newId(), name: fn?.name ?? "", input, ...(Object.keys(extra).length ? { _compat: extra } : {}) });
+    content.push({ type: "tool_use", id: id || newId(), name: fn?.name ?? "", input, ...(Object.keys(extra).length ? { _compat: extra } : {}), ...(model ? { _model: model } : {}) });
   }
   const usesTools = content.some((b) => b.type === "tool_use");
   return { stop_reason: usesTools ? "tool_use" : reply.choices?.[0]?.finish_reason === "length" ? "max_tokens" : "end_turn", content };
 }
 
+/** Seconds from a "Please retry in 16h24m30.1s" / "retry in 12s" hint. */
+export function retryHintSeconds(body: string): number | undefined {
+  const m = /retry in ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)/i.exec(body);
+  if (!m?.[1]) return undefined;
+  const h = /(\d+)h/.exec(m[1]), mi = /(\d+)m(?!s)/.exec(m[1]), sec = /([\d.]+)s/.exec(m[1]);
+  const total = Number(h?.[1] ?? 0) * 3600 + Number(mi?.[1] ?? 0) * 60 + Number(sec?.[1] ?? 0);
+  return total > 0 ? total : undefined;
+}
+
+/** A 429 that will not clear within minutes (a per-day quota). */
+export function isDailyQuota(body: string): boolean {
+  return /PerDay|per day/i.test(body) || (retryHintSeconds(body) ?? 0) > 600;
+}
+
+/**
+ * `cfg.model` may list several models, comma-separated. They are tried in order;
+ * a model whose daily quota is used up is skipped until its quota resets.
+ */
 export function createOpenAICompatClient(cfg: OpenAICompatConfig): ModelClient {
   const doFetch = cfg.fetch ?? fetch;
   const url = `${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const models = cfg.model.split(",").map((m) => m.trim()).filter(Boolean);
+  const exhaustedUntil = new Map<string, number>();
+  const usable = () => models.filter((m) => (exhaustedUntil.get(m) ?? 0) <= Date.now());
   let n = 0;
   const create = async (params: CreateParams) => {
-    const body = {
-      model: cfg.model,
-      messages: toChatMessages(params),
-      ...(params.tools?.length
-        ? { tools: params.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description ?? "", parameters: cleanSchema(t.input_schema) } })) }
-        : {}),
-      ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),
-    };
+    const tools = params.tools?.length
+      ? { tools: params.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description ?? "", parameters: cleanSchema(t.input_schema) } })) }
+      : {};
     const retries = cfg.maxRetries ?? 3;
-    for (let attempt = 0; ; attempt++) {
+    let attempt = 0;
+    for (;;) {
+      const model = usable()[0];
+      if (!model) throw new ModelQuotaError(`${cfg.label}: the free daily quota of every configured model is used up`);
+      const body = { model, messages: toChatMessages(params, model), ...tools, ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}) };
       let res: Response;
       try {
         res = await doFetch(url, {
@@ -154,26 +195,37 @@ export function createOpenAICompatClient(cfg: OpenAICompatConfig): ModelClient {
           signal: AbortSignal.timeout(cfg.timeoutMs ?? 45_000),
         });
       } catch (err) {
-        if (attempt >= retries) throw new Error(`${cfg.label} request failed: ${(err as Error).message}`);
+        if (++attempt > retries) throw new Error(`${cfg.label} request failed: ${(err as Error).message}`);
         continue;
       }
-      if (res.ok) return fromChatReply((await res.json()) as ChatReply, () => `call_${++n}`);
-      const retryable = res.status === 429 || res.status >= 500;
-      if (!retryable || attempt >= retries) {
-        const detail = (await res.text().catch(() => "")).slice(0, 300);
-        throw new Error(`${cfg.label} request failed: ${res.status} ${detail}`);
+      if (res.ok) return fromChatReply((await res.json()) as ChatReply, () => `call_${++n}`, model);
+      const detail = await res.text().catch(() => "");
+      if (res.status === 429 && isDailyQuota(detail)) {
+        // Try the next model right away; this one is done until its quota resets.
+        exhaustedUntil.set(model, Date.now() + (retryHintSeconds(detail) ?? 3600) * 1000);
+        console.warn(`${cfg.label}: daily quota used up for ${model}; switching model`);
+        continue;
       }
-      const after = Number(res.headers.get("retry-after"));
-      await new Promise((r) => setTimeout(r, Number.isFinite(after) && after > 0 ? after * 1000 : (cfg.retryDelayMs ?? 4000) * (attempt + 1)));
+      const retryable = res.status === 429 || res.status >= 500;
+      if (!retryable || ++attempt > retries) throw new Error(`${cfg.label} request failed: ${res.status} ${detail.slice(0, 300)}`);
+      const after = Number(res.headers.get("retry-after")) || retryHintSeconds(detail);
+      await new Promise((r) => setTimeout(r, after && after > 0 && after <= 60 ? after * 1000 : (cfg.retryDelayMs ?? 4000) * attempt));
     }
   };
-  return { client: { beta: { messages: { create } } } as unknown as Anthropic, label: cfg.label, model: cfg.model };
+  return {
+    client: { beta: { messages: { create } } } as unknown as Anthropic,
+    label: cfg.label,
+    model: models.join(","),
+    available: () => usable().length > 0,
+  };
 }
 
 /** Gemini's OpenAI-compatible endpoint (free tier available from Google AI Studio). */
 export const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
-// gemini-flash-latest / gemini-3.8-flash hung on tool calls in testing (2026-11-01); 3.5 answered in ~1 s.
-export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash";
+// Free tier quotas are per model and per day (gemini-3.5-flash: 20 requests/day as of 2026-11-01),
+// so the default rotates through models. Flash-Lite first: in testing it finished a run in ~5 s.
+// gemini-flash-latest / gemini-3.8-flash hung on tool calls; gemini-2.5-flash is closed to new users.
+export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash";
 
 /**
  * Pick the model from the environment: ANTHROPIC_API_KEY (Claude) first, then

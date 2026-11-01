@@ -223,9 +223,10 @@ export function createOpenAICompatClient(cfg: OpenAICompatConfig): ModelClient {
 /** Gemini's OpenAI-compatible endpoint (free tier available from Google AI Studio). */
 export const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
 // Free tier quotas are per model and per day (gemini-3.5-flash: 20 requests/day as of 2026-11-01),
-// so the default rotates through models. Flash-Lite first: in testing it finished a run in ~5 s.
+// so the default rotates through five models that answered tool calls in testing (2026-11-02).
+// Flash-Lite first: in testing it finished a run in ~5 s.
 // gemini-flash-latest / gemini-3.8-flash hung on tool calls; gemini-2.5-flash is closed to new users.
-export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash";
+export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.1-flash-lite-preview,gemini-3-flash-preview,gemini-3.5-flash";
 
 /**
  * Pick the model from the environment: ANTHROPIC_API_KEY (Claude) first, then

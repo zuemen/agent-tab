@@ -95,7 +95,7 @@ describe("OpenAI-compatible adapter", () => {
 
   it("picks the model from the environment", async () => {
     expect(await modelFromEnv({})).toBeUndefined();
-    expect(await modelFromEnv({ GEMINI_API_KEY: "g" })).toMatchObject({ label: "Gemini", model: "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash" });
+    expect(await modelFromEnv({ GEMINI_API_KEY: "g" })).toMatchObject({ label: "Gemini", model: "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.1-flash-lite-preview,gemini-3-flash-preview,gemini-3.5-flash" });
     expect(await modelFromEnv({ GEMINI_API_KEY: "g", LLM_MODEL: "gemini-x", LLM_LABEL: "Gemini X" })).toMatchObject({ label: "Gemini X", model: "gemini-x" });
     expect(await modelFromEnv({ LLM_BASE_URL: "https://x", LLM_API_KEY: "k", LLM_MODEL: "llama" })).toMatchObject({ label: "llama", model: "llama" });
     expect(await modelFromEnv({ ANTHROPIC_API_KEY: "a", GEMINI_API_KEY: "g" })).toMatchObject({ label: "Claude", model: "claude-sonnet-5-5" });

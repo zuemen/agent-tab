@@ -1,0 +1,21 @@
+# Render's free plan spins the demo down after 15 idle minutes, and waking it takes about a minute.
+# Ping the hosted demo every 10 minutes through the judging period so judges never wait.
+name: keep demo warm
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  ping:
+    if: github.repository == 'zuemen/agent-tab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping the hosted demo
+        run: |
+          for i in 1 2 3; do
+            if curl -fsS --max-time 90 https://agent-tab.onrender.com/api/demo/info -o /dev/null; then echo "warm"; exit 0; fi
+            sleep 10
+          done
+          echo "demo did not answer" && exit 1

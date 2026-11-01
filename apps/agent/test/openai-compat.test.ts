@@ -95,9 +95,22 @@ describe("OpenAI-compatible adapter", () => {
 
   it("picks the model from the environment", async () => {
     expect(await modelFromEnv({})).toBeUndefined();
-    expect(await modelFromEnv({ GEMINI_API_KEY: "g" })).toMatchObject({ label: "Gemini", model: "gemini-flash-latest" });
+    expect(await modelFromEnv({ GEMINI_API_KEY: "g" })).toMatchObject({ label: "Gemini", model: "gemini-3.5-flash" });
     expect(await modelFromEnv({ GEMINI_API_KEY: "g", LLM_MODEL: "gemini-x", LLM_LABEL: "Gemini X" })).toMatchObject({ label: "Gemini X", model: "gemini-x" });
     expect(await modelFromEnv({ LLM_BASE_URL: "https://x", LLM_API_KEY: "k", LLM_MODEL: "llama" })).toMatchObject({ label: "llama", model: "llama" });
     expect(await modelFromEnv({ ANTHROPIC_API_KEY: "a", GEMINI_API_KEY: "g" })).toMatchObject({ label: "Claude", model: "claude-sonnet-5-5" });
+  });
+});
+
+describe("OpenAI-compatible adapter timeouts", () => {
+  it("retries a hung request, then reports it", async () => {
+    let n = 0;
+    const hang = ((_u: string, init: RequestInit) => {
+      n++;
+      return new Promise<Response>((_r, reject) => init.signal!.addEventListener("abort", () => reject(new Error("aborted"))));
+    }) as unknown as typeof fetch;
+    const m = createOpenAICompatClient({ baseUrl: "https://llm.test", apiKey: "k", model: "m", label: "Test", fetch: hang, timeoutMs: 20, maxRetries: 1 });
+    await expect((m.client.beta.messages.create as unknown as (p: unknown) => Promise<unknown>)({ messages: [{ role: "user", content: "q" }] })).rejects.toThrow(/Test request failed/);
+    expect(n).toBe(2);
   });
 });

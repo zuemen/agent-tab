@@ -20,6 +20,8 @@ export interface OpenAICompatConfig {
   /** Retries on 429/5xx. Free tiers rate-limit per minute. */
   maxRetries?: number;
   retryDelayMs?: number;
+  /** Per-request timeout; a hung request is retried like a 5xx. */
+  timeoutMs?: number;
 }
 
 export interface ModelClient {
@@ -143,11 +145,18 @@ export function createOpenAICompatClient(cfg: OpenAICompatConfig): ModelClient {
     };
     const retries = cfg.maxRetries ?? 3;
     for (let attempt = 0; ; attempt++) {
-      const res = await doFetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
-        body: JSON.stringify(body),
-      });
+      let res: Response;
+      try {
+        res = await doFetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(cfg.timeoutMs ?? 45_000),
+        });
+      } catch (err) {
+        if (attempt >= retries) throw new Error(`${cfg.label} request failed: ${(err as Error).message}`);
+        continue;
+      }
       if (res.ok) return fromChatReply((await res.json()) as ChatReply, () => `call_${++n}`);
       const retryable = res.status === 429 || res.status >= 500;
       if (!retryable || attempt >= retries) {
@@ -163,7 +172,8 @@ export function createOpenAICompatClient(cfg: OpenAICompatConfig): ModelClient {
 
 /** Gemini's OpenAI-compatible endpoint (free tier available from Google AI Studio). */
 export const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
-export const GEMINI_DEFAULT_MODEL = "gemini-flash-latest";
+// gemini-flash-latest / gemini-3.8-flash hung on tool calls in testing (2026-11-01); 3.5 answered in ~1 s.
+export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash";
 
 /**
  * Pick the model from the environment: ANTHROPIC_API_KEY (Claude) first, then

@@ -9,18 +9,20 @@ let server: ServerType;
 let base = "";
 let rail: SimulatedRail;
 let demo: ReturnType<typeof buildDemo>;
+let demoOpts: Parameters<typeof buildDemo>[0];
 const owners = new Map<string, string>();
 const H = (tabId: string) => ({ "content-type": "application/json", "x-agenttab-owner": owners.get(tabId) ?? "" });
 
 beforeAll(async () => {
   rail = new SimulatedRail("http://pending/simulated/approve");
-  demo = buildDemo({
+  demoOpts = {
     rail,
     network: "paypal:simulated",
     publicUrl: "http://pending",
     internalUrl: () => base,
     payoutReceiver: (id) => `${id}@example.com`,
-  });
+  };
+  demo = buildDemo(demoOpts);
   await new Promise<void>((resolve) => {
     server = serve({ fetch: demo.app.fetch, port: 0 }, (info) => {
       base = `http://127.0.0.1:${info.port}`;
@@ -89,6 +91,34 @@ describe("all-in-one demo", () => {
     expect(closed.status).toBe("closed");
     expect(closed.totals.captured).toBe("0.77");
     expect(closed.payout.lines.length).toBe(3);
+  });
+
+  it("answers by fixed rules and still proposes a refund when the model's quota is used up", async () => {
+    const tabId = await approveDemoTab();
+    demoOpts.model = { client: {} as never, label: "Test", model: "m", available: () => false };
+    try {
+      const run = await fetch(`${base}/api/demo/run`, { method: "POST", headers: H(tabId), body: JSON.stringify({ tabId }) }).then((r) => r.json());
+      expect(run.mode).toBe("scripted");
+      expect(run.note).toMatch(/free AI quota for today is used up/);
+      await waitFor(async () => {
+        const s = await fetch(`${base}/api/demo/runs/${tabId}`, { headers: H(tabId) }).then((r) => r.json());
+        return s.running ? undefined : true;
+      });
+      const ask = await fetch(`${base}/api/tabs/${tabId}/ask`, { method: "POST", headers: H(tabId), body: JSON.stringify({ question: "Which charge was least worth it? Propose a refund." }) });
+      expect(ask.status).toBe(200);
+      const body = await ask.json();
+      expect(body.ruleBased).toBe(true);
+      expect(body.answer).toMatch(/fixed rules/);
+      // The scripted plan reads two articles from the same paid tool: the rule picks the second one.
+      expect(body.answer).toMatch(/Call #2 .*same paid tool as call #1 \(harbor-gazette\/read_article\)/);
+      const v = await fetch(`${base}/api/tabs/${tabId}`, { headers: H(tabId) }).then((r) => r.json());
+      const proposal = v.refunds.find((r: { status: string }) => r.status === "proposed");
+      expect(proposal.amount).toBe("0.05");
+      const done = await fetch(`${base}/api/tabs/${tabId}/refunds/${proposal.id}/confirm`, { method: "POST", headers: H(tabId), body: "{}" }).then((r) => r.json());
+      expect(done.status).toBe("completed");
+    } finally {
+      delete demoOpts.model;
+    }
   });
 
   it("serves each seller over Streamable HTTP to any MCP client", async () => {

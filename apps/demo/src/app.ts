@@ -11,7 +11,7 @@ import { OWNER_HEADER, TabService, UserError, clientIp, createApp, rateLimiter, 
 import { SELLERS, facilitatorClientFor, prepareSeller, type PreparedSeller } from "@agent-tab/seller-mcp";
 import { connectSeller, runClaudeAgent, runScriptedAgent, type AgentEvent, type ModelClient } from "@agent-tab/agent";
 import type { PayPalNetwork } from "@agent-tab/x402-paypal";
-import { askAssistant, connectPayPalToolkit } from "./assistant.ts";
+import { askAssistant, connectPayPalToolkit, ruleBasedAnswer, type AssistantEvent } from "./assistant.ts";
 
 export const DEMO_TASK =
   "I run Harbor Bean, a small café next to the Port Alder ferry terminal. Should I add an oat-milk cold brew this season, and at what price? Use the paid sources only where they help.";
@@ -216,33 +216,40 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
     if (typeof question !== "string" || !question.trim() || question.length > 500) return c.json({ error: "Ask a question (max 500 characters)." }, 400);
     const session = sessions.get(tabId);
     if (session && session.questions >= 8) return c.json({ error: "Question limit for this tab reached." }, 429);
-    if (!allowClaude(c)) return c.json({ error: "The assistant is busy; try again later." }, 429);
     if (session) session.questions++;
     const view = service.view(tabId) as { paypal?: { orderId?: string } };
+    const actions: unknown[] = [];
+    const proposeRefund = async (n: number, reason: string) => {
+      await service.prepareRefund(tabId, n);
+      return service.proposeRefund(tabId, n, reason || "requested in the tab assistant");
+    };
+    const onEvent = (ev: AssistantEvent) => {
+      actions.push(ev);
+      service.events.emit("event", { tabId, type: "assistant", at: Date.now(), detail: ev });
+    };
+    // No model available (daily free quota used up, or this hour's cap reached): answer by fixed rules,
+    // labeled as such, so the owner can still dispute a charge.
+    const ruleBased = async () =>
+      c.json({ answer: await ruleBasedAnswer({ question, view: view as never, proposeRefund, onEvent }), actions, paypalTools: false, ruleBased: true });
+    const model = opts.model;
+    if (!(model.available?.() ?? true) || !allowClaude(c)) return ruleBased();
     if (opts.rail instanceof SandboxRail && (!toolkit || Date.now() - toolkit.at > 30 * 60_000)) {
       toolkit = { client: await connectPayPalToolkit(await opts.rail.getAccessToken()), at: Date.now() };
     }
-    const actions: unknown[] = [];
     try {
       const answer = await askAssistant({
         question,
         facts: { tabId, ...(view.paypal?.orderId ? { orderId: view.paypal.orderId } : {}), view },
-        proposeRefund: async (n, reason) => {
-          await service.prepareRefund(tabId, n);
-          return service.proposeRefund(tabId, n, reason || "requested in the tab assistant");
-        },
+        proposeRefund,
         ...(toolkit ? { toolkit: toolkit.client } : {}),
-        anthropic: opts.model.client,
-        model: opts.model.model,
-        onEvent: (ev) => {
-          actions.push(ev);
-          service.events.emit("event", { tabId, type: "assistant", at: Date.now(), detail: ev });
-        },
+        anthropic: model.client,
+        model: model.model,
+        onEvent,
       });
       return c.json({ answer, actions, paypalTools: !!toolkit });
     } catch (err) {
       console.error("assistant", tabId, err);
-      if ((err as Error).name === "ModelQuotaError") return c.json({ error: "The free AI quota for today is used up (it resets at midnight Pacific time)." }, 429);
+      if ((err as Error).name === "ModelQuotaError" && !actions.length) return ruleBased();
       return c.json({ error: `The assistant could not answer right now${httpStatus(err)}.` }, 502);
     }
   });

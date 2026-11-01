@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { askAssistant, type AssistantEvent } from "../src/assistant.ts";
+import { askAssistant, type AssistantEvent, ruleBasedAnswer, ruleBasedPick } from "../src/assistant.ts";
 
 function fakeToolkit() {
   const calls: { name: string; arguments: Record<string, unknown> }[] = [];
@@ -87,5 +87,36 @@ describe("tab assistant", () => {
     const refusing = { beta: { messages: { create: async () => ({ stop_reason: "refusal", content: [] }) } } };
     const answer = await askAssistant({ question: "q", facts, proposeRefund: () => ({}), anthropic: refusing as never });
     expect(answer).toMatch(/can't help/);
+  });
+});
+
+describe("rule-based fallback (no model)", () => {
+  const e = (seq: number, resource: string, cents: number) => ({ seq, seller: resource.split("/")[0]!, resource, amountMicros: cents * 10_000 });
+
+  it("picks a repeat purchase first, then the most expensive call, skipping refunded and sub-cent calls", () => {
+    const entries = [e(1, "data/price", 2), e(2, "data/price", 2), e(3, "data/menu", 25), e(4, "panel/ask", 40)];
+    expect(ruleBasedPick({ entries })).toEqual({ seq: 2, reason: "it is another purchase from the same paid tool as call #1 (data/price)" });
+    expect(ruleBasedPick({ entries, refunds: [{ entrySeq: 2, status: "completed" }] })).toEqual({ seq: 4, reason: "it was the most expensive call (panel/ask)" });
+    expect(ruleBasedPick({ entries: [{ ...e(1, "a/b", 0), amountMicros: 5_000 }] })).toBeUndefined();
+  });
+
+  it("proposes the refund only when asked, and always says it is rule-based", async () => {
+    const view = { entries: [e(1, "data/price", 2), e(2, "panel/ask", 40)] };
+    const proposed: number[] = [];
+    const events: string[] = [];
+    const list = await ruleBasedAnswer({ question: "what did I buy?", view, proposeRefund: (n) => proposed.push(n), onEvent: (ev) => events.push(ev.type) });
+    expect(list).toMatch(/fixed rules/);
+    expect(list).toMatch(/#2 panel\/ask \$0\.40/);
+    expect(proposed).toEqual([]);
+    const ans = await ruleBasedAnswer({ question: "Which charge was least worth it? Propose a refund.", view, proposeRefund: (n) => proposed.push(n), onEvent: (ev) => events.push(ev.type) });
+    expect(ans).toMatch(/fixed rules/);
+    expect(ans).toMatch(/Call #2 .*most expensive/);
+    expect(proposed).toEqual([2]);
+    expect(events).toEqual(["refund_proposed"]);
+  });
+
+  it("reports when the picked call cannot be refunded", async () => {
+    const ans = await ruleBasedAnswer({ question: "refund it", view: { entries: [e(1, "a/b", 5)] }, proposeRefund: () => { throw new Error("not allowed"); } });
+    expect(ans).toMatch(/cannot be refunded: not allowed/);
   });
 });

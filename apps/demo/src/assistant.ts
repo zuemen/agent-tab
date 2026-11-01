@@ -134,3 +134,52 @@ export async function askAssistant(opts: {
   }
   return "I could not finish answering that.";
 }
+
+// ---------- rule-based fallback (no model available) ----------
+
+interface FallbackView {
+  entries?: { seq: number; seller: string; resource: string; amountMicros: number; amount?: string }[];
+  refunds?: { entrySeq: number; status: string }[];
+}
+
+const REFUND_INTENT = /refund|worth|waste|dispute|duplicate|redundant|wrong|money back|charge/i;
+const RULE_NOTE = "The AI quota for this demo is used up for now, so this answer comes from fixed rules, not a language model.";
+
+/**
+ * When no model can answer (free quota used up), pick a call by fixed rules so
+ * the owner can still dispute a charge: first another purchase from a paid tool
+ * already used (the ledger records the tool, not the exact item), otherwise the
+ * most expensive call. Proposals still need the owner's confirmation. The
+ * answer always says it is rule-based.
+ */
+export function ruleBasedPick(view: FallbackView): { seq: number; reason: string } | undefined {
+  const refunded = new Set((view.refunds ?? []).filter((r) => r.status !== "failed").map((r) => r.entrySeq));
+  const entries = (view.entries ?? []).filter((e) => e.amountMicros >= 10_000 && !refunded.has(e.seq));
+  const firstSeen = new Map<string, number>();
+  for (const e of view.entries ?? []) if (!firstSeen.has(e.resource)) firstSeen.set(e.resource, e.seq);
+  const repeat = [...entries].reverse().find((e) => firstSeen.get(e.resource) !== e.seq);
+  if (repeat) return { seq: repeat.seq, reason: `it is another purchase from the same paid tool as call #${firstSeen.get(repeat.resource)} (${repeat.resource})` };
+  const priciest = [...entries].sort((a, b) => b.amountMicros - a.amountMicros || b.seq - a.seq)[0];
+  return priciest ? { seq: priciest.seq, reason: `it was the most expensive call (${priciest.resource})` } : undefined;
+}
+
+export async function ruleBasedAnswer(opts: {
+  question: string;
+  view: FallbackView;
+  proposeRefund: (callNumber: number, reason: string) => unknown;
+  onEvent?: (ev: AssistantEvent) => void;
+}): Promise<string> {
+  const entries = opts.view.entries ?? [];
+  if (!entries.length) return `${RULE_NOTE}\n\nNothing has been bought on this tab yet.`;
+  const list = entries.map((e) => `#${e.seq} ${e.resource} $${e.amount ?? (e.amountMicros / 1e6).toFixed(2)}`).join("\n");
+  if (!REFUND_INTENT.test(opts.question)) return `${RULE_NOTE}\n\nPaid calls on this tab:\n${list}`;
+  const pick = ruleBasedPick(opts.view);
+  if (!pick) return `${RULE_NOTE}\n\nThere is no call left that can be refunded.\n\nPaid calls:\n${list}`;
+  try {
+    await opts.proposeRefund(pick.seq, `rule-based: ${pick.reason}`);
+  } catch (err) {
+    return `${RULE_NOTE}\n\nCall #${pick.seq} looked least worth it because ${pick.reason}, but it cannot be refunded: ${(err as Error).message}`;
+  }
+  opts.onEvent?.({ type: "refund_proposed", detail: { callNumber: pick.seq, ruleBased: true } });
+  return `${RULE_NOTE}\n\nCall #${pick.seq} looks least worth it because ${pick.reason}. I have proposed a refund for it. No money has moved: press Confirm refund in the Refunds list to send it.`;
+}

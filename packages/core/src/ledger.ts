@@ -121,7 +121,9 @@ export type RejectCode =
   | "OVER_PER_CALL_CAP"
   | "OVER_BUDGET"
   | "TERMS_MISMATCH"
-  | "UNKNOWN_RESERVATION";
+  | "UNKNOWN_RESERVATION"
+  /** The call is paid for on the tab but not yet captured from PayPal. */
+  | "NOT_CAPTURED";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; code: RejectCode; message: string };
 
@@ -291,7 +293,11 @@ export function beginClose(tab: TabState, reason: CloseReason): void {
  * Interim captures take whole cents once the threshold has accrued; the final
  * capture rounds the remainder half-up. Never exceeds the authorized budget.
  */
-export function planCapture(tab: TabState, final: boolean): number {
+/**
+ * Cents to capture now. `early` captures what has accrued below the threshold
+ * (used before refunding a call that is not captured yet).
+ */
+export function planCapture(tab: TabState, final: boolean, early = false): number {
   if (tab.captures.some((c) => c.status === "pending")) return 0;
   const t = totals(tab);
   const budgetCents = tab.mandate.budgetMicros / MICROS_PER_CENT;
@@ -300,7 +306,7 @@ export function planCapture(tab: TabState, final: boolean): number {
   if (final) {
     cents = Math.floor((t.uncapturedMicros + MICROS_PER_CENT / 2) / MICROS_PER_CENT);
   } else {
-    if (tab.status !== "active" || t.uncapturedMicros < tab.mandate.captureThresholdMicros) return 0;
+    if (tab.status !== "active" || (!early && t.uncapturedMicros < tab.mandate.captureThresholdMicros)) return 0;
     cents = Math.floor(t.uncapturedMicros / MICROS_PER_CENT);
   }
   return Math.max(0, Math.min(cents, headroom));
@@ -428,6 +434,6 @@ export function planRefund(tab: TabState, entrySeq: number): Result<{ seller: st
     .filter((x) => x.left >= amountCents);
   // Prefer the capture that took in this call (the first one after it settled).
   const pick = usable.find((x) => x.c.createdAt >= entry.settledAt) ?? usable[0];
-  if (!pick) return reject("OVER_BUDGET", `call #${entrySeq} has not been captured yet, so there is nothing to refund`);
+  if (!pick) return reject("NOT_CAPTURED", `call #${entrySeq} has not been captured yet, so there is nothing to refund`);
   return { ok: true, value: { seller: entry.seller, amountCents, paypalCaptureId: pick.c.paypalCaptureId! } };
 }

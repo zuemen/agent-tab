@@ -56,7 +56,7 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 ## Where the AI is
 
 - **The buying agent** (`apps/agent/src/agent.ts`) is a language model with tool use. It sees each seller's tools and prices, decides what is worth buying for the owner's question, pays from the tab, and reports what it bought and why. Refused payments come back as tool errors and the agent explains them instead of working around them.
-- **The tab assistant** (`apps/demo/src/assistant.ts`) answers the owner's questions about the tab ("what did the panel question cost?"), checks the order with PayPal through the PayPal Agent Toolkit, and can *propose* a refund of a specific call. It never moves money: the owner confirms each refund.
+- **The tab assistant** (`apps/demo/src/assistant.ts`) answers the owner's questions about the tab ("which charge was least worth it?"), checks the order with PayPal through the PayPal Agent Toolkit, and can *propose* a refund of a specific call. It never moves money: the owner confirms each refund.
 - **Which model.** The hosted demo runs **Gemini Flash-Lite on Google's free tier** (rotating to the next Gemini model when one model's daily free quota is used up), through a small adapter (`apps/agent/src/openai-compat.ts`) that serves the same tool-use loop over any OpenAI-compatible chat completions API. The loops were written for Claude and run on it unchanged when `ANTHROPIC_API_KEY` is set (it takes precedence). Configure with `GEMINI_API_KEY`, or `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` for another provider. `npm run model:check` runs the demo once with the configured model on the simulated rail.
 - The free tier is rate-limited per model per day. The server also caps model runs at `MAX_CLAUDE_RUNS_PER_HOUR` (default 20); beyond that, when every model's daily quota is used up (the UI says so; quotas reset at midnight Pacific), or with no model key at all, the agent runs a fixed **scripted** purchase plan and the UI says so. The tab assistant needs a model key.
 
@@ -73,7 +73,7 @@ AI agents increasingly need to buy things per call: an article, a data query, an
 | No replay, no forgery | Nonces are burned on use; only the key on the mandate can sign. The signature protects against sellers and third parties. It does not replace the hard cap, which is the PayPal authorization |
 | Revoke | One call: stop new charges, capture what was used, void the rest |
 | Capture failure | Only captures PayPal reports `COMPLETED` (or `PENDING`) count. Before judging a failure, AgentTab reads the order from PayPal and adopts any capture it missed; if PayPal cannot be asked, nothing is judged and the capture is retried with the same `PayPal-Request-Id`. A definitive refusal, or a `PENDING` capture PayPal later declines, freezes the tab. The authorization is not released while a capture is still `PENDING` |
-| Refunds | Proposed per paid call (by the owner or the assistant), executed only on the owner's confirmation, never more than the call cost, and deducted from that seller's payout. Sellers are paid only after confirmed refunds have gone through; a retried refund is first looked up on the PayPal order so it is never sent twice |
+| Refunds | Proposed per paid call (by the owner or the assistant), executed only on the owner's confirmation, never more than the call cost, and deducted from that seller's payout. A call that is paid on the tab but not yet captured is captured early first (the owner owes it either way), so it has a PayPal capture to refund from; this costs one extra capture. Sellers are paid only after confirmed refunds have gone through; a retried refund is first looked up on the PayPal order so it is never sent twice |
 | Retries | Capture, void, payout and refund retries each back off on their own schedule (1 minute doubling to 1 hour); void, payout and refund stop after 8 attempts for manual follow-up. A capture or refund whose outcome is unknown is never sent again until PayPal's records show it did not happen. A void that fails never holds up the sellers' payouts |
 
 ## Run it
@@ -107,7 +107,7 @@ Each demo seller is a Streamable HTTP MCP server at `http://localhost:4020/mcp/<
 ## Tests
 
 ```bash
-npm test          # 79 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
+npm test          # 90 tests: ledger, PayPal rail, x402 scheme over MCP end to end, PayPal failure handling, owner key, refunds, demo server, assistant
 npm run typecheck
 ```
 
@@ -141,6 +141,7 @@ We did not find a public implementation that combines a single PayPal authorizat
 - **Single process, JSON persistence.** Fine for a demo; a real deployment needs a database.
 - **Tabs longer than 3 days** would need PayPal reauthorization, which is not implemented.
 - **Owner identity.** The review link is a bearer link the requesting agent also sees, so before approval AgentTab cannot fully tell the owner from the agent. The checks are: the terms are shown on PayPal's own approval page, only the browser that submitted the terms can open the tab, and the owner's page warns when the terms came from somewhere else. Production would authenticate the owner directly (for example with Log in with PayPal). Approving at PayPal on another device works; the owner then presses Finish in the browser that submitted the terms. An agent that submits the terms itself and forwards the PayPal link straight to the owner can still end up holding the tab: the owner's PayPal return then says the terms came from elsewhere and not to continue, but a link the agent has seen cannot fully prove who the owner is. Tabs never finished in the owner's browser are cancelled at their expiry.
+- **Refunding a call before it is captured** costs an early capture (one more PayPal fee). A later version should instead drop the call from the next capture, so no money moves at all.
 - **Refunds below one cent.** PayPal moves whole cents, so a call that cost less than one cent cannot be refunded.
 - **Resource binding.** The item name in a charge comes from the seller's payment requirements; the per-call cap and budget are what bound a dishonest seller.
 

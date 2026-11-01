@@ -147,6 +147,7 @@ export function createApp(service: TabService, opts: AppOptions = {}): Hono {
   app.post("/api/tabs/:id/refunds", async (c) => {
     const id = requireOwner(c);
     const body = await json<{ entrySeq: number; reason?: string }>(c);
+    await service.prepareRefund(id, Number(body.entrySeq));
     return c.json(service.proposeRefund(id, Number(body.entrySeq), body.reason ?? "requested by the tab owner"), 201);
   });
   app.post("/api/tabs/:id/refunds/:rid/confirm", async (c) => {

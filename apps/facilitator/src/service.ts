@@ -538,7 +538,7 @@ export class TabService {
    * if PayPal no longer remembers the Request-Id. Only a definitive refusal,
    * confirmed against PayPal's records, freezes the tab.
    */
-  private async runCapture(tab: TabState, final: boolean): Promise<void> {
+  private async runCapture(tab: TabState, final: boolean, early = false): Promise<void> {
     const tabId = tab.mandate.tabId;
     let rec = tab.captures.find((c) => c.status === "pending");
     if (rec) {
@@ -547,7 +547,7 @@ export class TabService {
       if (rec.status !== "pending") return;
       if (!asked) return this.deferCapture(tab, rec, "PayPal's records could not be checked, so the capture was not sent again");
     } else {
-      const cents = planCapture(tab, final);
+      const cents = planCapture(tab, final, early);
       if (!cents) return;
       rec = beginCapture(tab, cents, final, this.now());
       this.persist();
@@ -712,6 +712,22 @@ export class TabService {
   }
 
   // ---------- refunds (proposed by the assistant, confirmed by the owner) ----------
+
+  /**
+   * Before proposing a refund of a call that is paid on the tab but not yet
+   * captured from PayPal: capture the usage so far now (the owner owes it
+   * either way), so the call has a PayPal capture to refund from. Costs one
+   * extra capture; does nothing when the call is already captured.
+   */
+  prepareRefund(tabId: string, entrySeq: number): Promise<void> {
+    return this.withLock(tabId, async () => {
+      const tab = this.tabs.get(tabId)?.state;
+      if (!tab || tab.status !== "active") return;
+      const plan = planRefund(tab, entrySeq);
+      if (plan.ok || plan.code !== "NOT_CAPTURED") return;
+      await this.runCapture(tab, false, true);
+    });
+  }
 
   proposeRefund(tabId: string, entrySeq: number, reason: string): RefundRecord {
     const tab = this.mustGet(tabId).state;

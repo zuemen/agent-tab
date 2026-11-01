@@ -322,6 +322,24 @@ describe("refunds", () => {
     pay(tabId, "news", 100_000);
     expect(() => svc.proposeRefund(tabId, 1, "x")).toThrow(/not been captured/);
   });
+
+  it("prepareRefund captures accrued usage below the threshold so the call can be refunded", async () => {
+    const { tabId } = await openTab({ captureThresholdUsd: "1.00" });
+    pay(tabId, "news", 100_000);
+    pay(tabId, "data", 50_000);
+    expect(rail.captures).toHaveLength(0);
+    await svc.prepareRefund(tabId, 1);
+    expect(rail.captures).toHaveLength(1);
+    expect(rail.captures[0]!.amountCents).toBe(15);
+    const proposal = svc.proposeRefund(tabId, 1, "x");
+    expect(proposal).toMatchObject({ status: "proposed", amountCents: 10 });
+    expect((await svc.confirmRefund(tabId, proposal.id)).status).toBe("completed");
+    // Already captured: a second call does not capture again.
+    await svc.prepareRefund(tabId, 2);
+    expect(rail.captures).toHaveLength(1);
+    const v: any = await svc.close(tabId, "closed_by_user");
+    expect(v.status).toBe("closed");
+  });
 });
 
 describe("refunds that are in flight when the tab closes", () => {

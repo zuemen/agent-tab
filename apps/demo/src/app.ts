@@ -227,7 +227,10 @@ export function buildDemo(opts: DemoOptions): { app: Hono; service: TabService; 
       const answer = await askAssistant({
         question,
         facts: { tabId, ...(view.paypal?.orderId ? { orderId: view.paypal.orderId } : {}), view },
-        proposeRefund: (n, reason) => service.proposeRefund(tabId, n, reason || "requested in the tab assistant"),
+        proposeRefund: async (n, reason) => {
+          await service.prepareRefund(tabId, n);
+          return service.proposeRefund(tabId, n, reason || "requested in the tab assistant");
+        },
         ...(toolkit ? { toolkit: toolkit.client } : {}),
         anthropic: opts.model.client,
         model: opts.model.model,

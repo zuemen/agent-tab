@@ -107,7 +107,7 @@ export async function askAssistant(opts: {
         reply(JSON.stringify(opts.facts.view));
       } else if (use.name === "propose_refund") {
         try {
-          const proposal = opts.proposeRefund(Number(input.call_number), String(input.reason ?? ""));
+          const proposal = await opts.proposeRefund(Number(input.call_number), String(input.reason ?? ""));
           opts.onEvent?.({ type: "refund_proposed", detail: { callNumber: input.call_number } });
           reply(JSON.stringify({ proposed: proposal, note: "No money has moved. The owner must press Confirm." }));
         } catch (err) {

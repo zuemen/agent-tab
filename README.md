@@ -16,6 +16,14 @@ Your agent asks for a budget. You approve it once with PayPal. Every paid tool c
 4. In **Ask about this tab**, ask *"Which charge was least worth it? Propose a refund."* → press **Confirm refund**.
 5. **Close tab**: the rest of the hold is released and each seller is paid out through PayPal Payouts.
 
+| 1. The agent's request (Velvet is not on the list) | 2. The agent buys; usage is captured from the PayPal hold |
+|---|---|
+| ![Review the spending request](docs/img/review.jpg) | ![Tab running](docs/img/tab-running.jpg) |
+| **3. The assistant looks up the order and proposes a refund** | **4. Closed: rest released, sellers paid out** |
+| ![Refund proposed](docs/img/refund.jpg) | ![Closed and paid out](docs/img/closed.jpg) |
+
+*Screenshots from a run on the hosted demo (PayPal sandbox, 2026-11-02).*
+
 The hosted model is Gemini on Google's free tier. If its daily quota runs out, the page says so and the agent follows a labeled scripted plan; the PayPal flow is unchanged. To run it yourself, see [Run it](#run-it).
 
 ---

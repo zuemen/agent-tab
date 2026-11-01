@@ -97,7 +97,7 @@ Then: **Start the demo → review the agent's request → Authorize with PayPal 
 npm run sandbox:smoke     # authorize → partial capture ×2 (+ idempotent retry) → final capture | void → payout
 ```
 
-It prints an approval link, waits for you to approve with a sandbox buyer account, and writes a JSON record of every PayPal id and status to `.data/`.
+It prints an approval link, waits for you to approve with a sandbox buyer account, and writes a JSON record of every PayPal id and status to `.data/`. Results from the 2026-11-01 sandbox runs (all steps passed): [`docs/SANDBOX_EVIDENCE.md`](docs/SANDBOX_EVIDENCE.md).
 
 ### Use the sellers from your own MCP client
 

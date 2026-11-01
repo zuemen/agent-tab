@@ -28,6 +28,7 @@ const rail = new SandboxRail({ clientId, clientSecret, brandName: "AgentTab smok
 const run = `smoke-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
 const record: { run: string; steps: Record<string, unknown>[] } = { run, steps: [] };
 const PORT = 4021;
+const APPROVAL_TIMEOUT_MIN = Number(process.env.SMOKE_APPROVAL_TIMEOUT_MIN ?? 30);
 
 function log(step: string, data: Record<string, unknown>) {
   const entry = { step, at: new Date().toISOString(), ...data };
@@ -52,7 +53,9 @@ async function attempt(step: string, fn: () => Promise<Record<string, unknown> |
 /** Wait for PayPal to redirect the buyer back to our local return URL. */
 function waitForApproval(): Promise<string> {
   return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const srv = createServer((req, res) => {
+      clearTimeout(timer);
       const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
       const token = url.searchParams.get("token");
       res.writeHead(200, { "content-type": "text/plain" });
@@ -67,15 +70,15 @@ function waitForApproval(): Promise<string> {
       }
     });
     srv.listen(PORT);
-    setTimeout(() => {
+    timer = setTimeout(() => {
       srv.close();
-      reject(new Error("timed out waiting for approval (10 min)"));
-    }, 600_000);
+      reject(new Error(`timed out waiting for approval (${APPROVAL_TIMEOUT_MIN} min)`));
+    }, APPROVAL_TIMEOUT_MIN * 60_000);
   });
 }
 
-async function scenario(path: "final" | "void") {
-  console.log(`\n=== ${path} path ===`);
+async function scenario(path: "final" | "void", step: string) {
+  console.log(`\n=== ${path} path (approval ${step}) ===`);
   const order = await attempt(`${path}:create_order`, async () => {
     const o = await rail.createAuthorizeOrder({
       tabId: `${run}-${path}`,
@@ -87,7 +90,7 @@ async function scenario(path: "final" | "void") {
     });
     return { orderId: o.orderId, approveUrl: o.approveUrl };
   });
-  console.log(`\nOpen this link, log in with a SANDBOX PERSONAL account, and approve $1.00:\n  ${order!.approveUrl}\n`);
+  console.log(`\nOpen this link, log in with a SANDBOX PERSONAL account, and approve $1.00 (approval ${step}).\nApprove in a browser on THIS computer: PayPal redirects back to http://localhost:${PORT}. Waiting up to ${APPROVAL_TIMEOUT_MIN} min.\n  ${order!.approveUrl}\n`);
   const token = await waitForApproval();
   const auth = await attempt(`${path}:authorize`, async () => {
     const a = await rail.authorizeOrder(token, `${run}-${path}-authorize`);
@@ -154,8 +157,9 @@ async function scenario(path: "final" | "void") {
 
 async function main() {
   const which = (process.argv[2] ?? "both") as "final" | "void" | "both";
-  if (which === "final" || which === "both") await scenario("final");
-  if (which === "void" || which === "both") await scenario("void");
+  if (which === "final" || which === "both") await scenario("final", which === "both" ? "1 of 2" : "1 of 1");
+  if (which === "both") console.log("\n>>> One more approval needed: a second PayPal link follows for the void path.");
+  if (which === "void" || which === "both") await scenario("void", which === "both" ? "2 of 2" : "1 of 1");
   const receiver = process.env.PAYOUT_RECEIVER;
   if (receiver) {
     await attempt("payout ($0.05)", async () => {

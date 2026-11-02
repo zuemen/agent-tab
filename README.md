@@ -8,7 +8,9 @@ Your agent asks for a budget. You approve it once with PayPal. Every paid tool c
 
 ## Try it in two minutes (judges)
 
-**Live demo: https://agent-tab.onrender.com** (PayPal sandbox, test money only)
+**Demo video (2:24): https://youtu.be/BvWgGFhxvj4**
+
+**Live demo: https://agent-tab.onrender.com** (PayPal sandbox, test money only). It runs on a free host: if it has been idle, the first load can take about a minute while it wakes.
 
 1. **Start the demo** → review the agent's spending request (budget, per-call cap, sellers, expiry) → **Authorize $5.00 with PayPal**.
 2. On PayPal's sandbox page, choose **Log in** (not "pay with card") and use the sandbox buyer account from the Devpost *testing instructions*, or any sandbox *personal* account of your own from developer.paypal.com.
